@@ -68,7 +68,8 @@ open GETTING_STARTED.md
 | `ARCHITECTURE.md` | 架构设计和技术细节 | 6 |
 | `TEMPLATES.md` | 消息和文件模板 | 7 |
 | `CAPABILITY_LAYERS.md` | 能力分层表 (L1/L2/L3) | 8 |
-| `CONTRIBUTING.md` | 贡献方式与提交流程 | 9 |
+| `examples/` | 协议实现示例代码 | 9 |
+| `CONTRIBUTING.md` | 贡献方式与提交流程 | 10 |
 
 ---
 
@@ -108,6 +109,7 @@ open GETTING_STARTED.md
 | `QUICKSTART.md` | 15 分钟快速部署指南 |
 | `TEMPLATES.md` | 派单/ACK/Final/Follow-up 模板 |
 | `CAPABILITY_LAYERS.md` | 能力分层表 (L1/L2/L3) |
+| `examples/` | 协议实现示例代码 (Python) |
 | `README.md` | 本文件 |
 
 ### 脱敏规则
@@ -257,7 +259,11 @@ openclaw-multiagent-framework/
 ├── CAPABILITY_LAYERS.md
 ├── CONTRIBUTING.md
 ├── .github/ISSUE_TEMPLATE/
-└── scripts/test-framework.sh
+└── examples/
+    ├── README.md
+    ├── protocol_messages.py    # 消息协议实现
+    ├── task_state_machine.py   # 状态机实现
+    └── test-protocol.sh        # 协议测试脚本
 ```
 
 ---
