@@ -1,90 +1,94 @@
 # completion-relay
 
-Lightweight listener for ACP task completion notifications.
+Lightweight listener for task completion events from `task-log.jsonl`.
 
-## Overview
+轻量级任务完成事件监听器，从 `task-log.jsonl` 读取事件。
 
-When the `spawn-interceptor` plugin injects completion relay instructions into
-ACP prompts, ACP sub-agents send `sessions_send` messages to a dedicated
-completion-relay session upon finishing their work. This listener picks up
-those messages and dispatches notifications.
+## How It Works / 工作原理
 
-## How It Works
+The `completion_listener.py` does **not** detect completion itself. It reads the unified event stream `task-log.jsonl`, which is written by:
+
+`completion_listener.py` **不**自己检测完成。它读取统一事件流 `task-log.jsonl`，该文件由以下组件写入：
+
+| Writer / 写入者 | Scope / 范围 | Latency / 延迟 |
+|----------------|-------------|----------------|
+| spawn-interceptor `subagent_ended` hook | runtime=subagent | <1s |
+| spawn-interceptor ACP Session Poller | runtime=acp | ~15s |
+| spawn-interceptor Stale Reaper | stuck tasks | 30min |
+| task-callback-bus WatcherBus | external tasks | adapter-driven |
 
 ```
-ACP sub-agent finishes work
-    ↓
-sessions_send(sessionKey="agent:main:completion-relay",
-              message={"type": "acp_completion", "taskId": "...", ...})
-    ↓
-completion_listener.py (cron every 1 min)
-    ↓
-  1. Reads messages from completion-relay session
-  2. Parses completion notifications
-  3. Updates task-log.jsonl with completion status
-  4. Prints notification to stdout (extend for Discord/Telegram)
+spawn-interceptor / WatcherBus
+         │  writes events
+         ▼
+  task-log.jsonl
+         │  reads events
+         ▼
+  completion_listener.py
+         │
+         ▼
+  stdout / Discord / Telegram
 ```
 
-## Usage
+## Usage / 用法
 
 ```bash
-# Single check
-python completion_listener.py --once
+# Single check / 单次检查
+python3 completion_listener.py --once
 
-# Continuous monitoring (every 60 seconds)
-python completion_listener.py --loop --interval 60
+# Continuous monitoring (every 30 seconds) / 持续监听
+python3 completion_listener.py --loop --interval 30
 
-# Custom task log location
-python completion_listener.py --once --task-log /path/to/task-log.jsonl
+# Custom task log location / 自定义日志路径
+python3 completion_listener.py --once --task-log /path/to/task-log.jsonl
 ```
 
-### Cron Setup
+### Cron Setup / 定时任务
 
 ```bash
-# Add to crontab: check every minute
-*/1 * * * * cd ~/.openclaw/repos/openclaw-multiagent-framework/examples/completion-relay && python3 completion_listener.py --once >> /tmp/completion-relay.log 2>&1
+*/1 * * * * cd /path/to/completion-relay && python3 completion_listener.py --once >> /tmp/completion-relay.log 2>&1
 ```
 
-## Message Format
+## Event Format / 事件格式
 
-The listener expects JSON messages in the completion-relay session:
+Events in `task-log.jsonl` follow this structure:
 
 ```json
 {
-  "type": "acp_completion",
-  "taskId": "tsk_20260312_abc123",
+  "taskId": "tsk_20260313_abc123",
+  "agentId": "main",
+  "runtime": "acp",
   "status": "completed",
-  "summary": "Analyzed 3 files, found 2 performance bottlenecks",
-  "error": ""
+  "completionSource": "acp_session_poller",
+  "spawnedAt": "2026-03-13T01:30:00.000Z",
+  "completedAt": "2026-03-13T01:32:15.000Z"
 }
 ```
 
-## Extending Notifications
+Key fields / 关键字段:
+- `status`: `spawning` → `completed` / `failed` / `timeout`
+- `completionSource`: `subagent_ended` | `acp_session_poller` | `stale_reaper` | `watcher_bus`
 
-The `notify()` function currently prints to stdout. To add Discord/Telegram:
+## Extending Notifications / 扩展通知
+
+The `notify()` function currently prints to stdout. To add webhooks:
 
 ```python
 def notify(task_id, status, summary, error=""):
-    # Default: stdout
     log.info(f"[{status}] {task_id}: {summary}")
     
-    # Add Discord webhook
+    # Discord webhook
     requests.post(DISCORD_WEBHOOK, json={
         "content": f"Task {task_id} {status}: {summary}"
     })
 ```
 
-## Compared to the Old Watcher
+## Tests / 测试
 
-| Aspect | Old Watcher (task_callback_bus) | Completion Relay |
-|--------|-------------------------------|------------------|
-| Method | Polls 6+ status files every 5 min | Reads 1 session on demand |
-| Code | 9,600 lines | ~200 lines |
-| Latency | Up to 5 minutes | < 1 minute (or real-time with hooks) |
-| Registration | Agent must remember to use wrapper | Automatic via plugin |
-| Reliability | notifications_sent: 0 (observed) | Direct sessions_send |
+```bash
+python3 -m pytest tests/ -v
+```
 
-## Files
+15 test cases covering cursor tracking, event parsing, and notification dispatch.
 
-- `completion_listener.py` — Main listener script
-- `README.md` — This file
+15 个测试用例，覆盖游标追踪、事件解析和通知分发。
