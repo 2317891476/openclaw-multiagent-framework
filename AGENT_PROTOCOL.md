@@ -1,6 +1,6 @@
 # AGENT_PROTOCOL.md — 团队统一协作协议
 
-> Version: 2026-03-12-v2.1 (ACK-First 强制版 + Wrapper 推荐)
+> Version: 2026-03-12-v3 (ACK-First 强制版 + Plugin 自动拦截)
 > Owner: main (Zoe)
 > Scope: All agents
 > Status: Canonical
@@ -25,8 +25,10 @@
 ### 2.1 控制面：`sessions_send`
 用于：派单、ACK、催办、简短结论、正式控制面消息。
 
-### 2.2 异步回执面：`task-watcher`
+### 2.2 异步回执面：`spawn-interceptor` + `completion-listener`
 用于：>10 秒长任务、后台任务、状态变化任务的终态通知。
+
+Agent 正常使用 `sessions_spawn`，plugin 自动追踪并注入完成回调。
 
 ### 2.3 共享状态面：`shared-context/*`
 用于：协议、任务真值、中间状态、follow-up、intel、dispatches。
@@ -39,10 +41,10 @@
 
 - `<= 3 秒`：允许同步完成
 - `> 3 秒`：必须先 ACK
-- `> 10 秒`：必须异步执行，并接入 task-watcher 或等价状态回推机制
+- `> 10 秒`：必须异步执行，spawn-interceptor plugin 自动追踪
 
 标准链路：
-`ACK -> 后台执行 -> 写 status/report -> terminal push`
+`ACK -> sessions_spawn -> plugin 自动追踪 -> completion-listener 回推`
 
 ---
 
@@ -97,83 +99,76 @@ ACK 最小格式：
 执行顺序固定：
 1. 当前会话先 ACK
 2. 生成 `task_id`
-3. 先注册 watcher / 状态文件
-4. 再启动后台执行（`sessions_spawn(mode="run")` 或 `exec(background=true)`）
-5. 终态由 watcher 或单一 terminal owner 回推
+3. spawn-interceptor 自动拦截并记录
+4. 再启动后台执行（`sessions_spawn`）
+5. 终态由 completion-listener 回推
 
 禁止：
 - 把 `sessions_send` 当同步 RPC 长等完整结果
 - 当前回合同步等待 ACP / agent / thread 回执
 - 一个异步任务发出两条 final
 
-### 5.1 ACP 任务监控注册规则（P0，2026-03-12）
+### 5.1 ACP 任务自动追踪（v3 - 2026-03-12）
 
-**根规则**：任何需要用户可见终态回推的 ACP 任务，不允许“裸启动”。
+**根规则**：所有 ACP 任务由 `spawn-interceptor` plugin 自动追踪，Agent 无需手动注册。
 
-必须满足：
-1. 有 `task_id`
-2. 有明确 `status_file`
-3. 有明确 `report_file` / `output_file`
-4. 已注册到 `monitor-tasks/tasks.jsonl`
-5. watcher 有可监控对象后，ACP 才算真正进入标准链路
+#### 工作原理
 
-#### ACP 强制顺序 (v3 - 2026-03-12)
+`spawn-interceptor` plugin 通过 `before_tool_call` hook 自动拦截所有 `sessions_spawn` 调用：
 
-1. ACK 用户
-2. 预先确定 `task_id / task_subject / reply_to`
-3. **必须使用 wrapper 启动**（自动处理 Guard 验证 + watcher 注册 + ACP 启动）
-4. ACP 线程按约定写 `status_file / report_file`
-5. watcher 盯 `status_file / report_file` 终态并推送
+1. **自动记录**：每次 `sessions_spawn` 调用自动写入 `monitor-tasks/task-log.jsonl`
+2. **自动注入回调**：ACP 任务的 prompt 自动追加完成回调指令
+3. **完成通知**：ACP 完成后通过 `sessions_send` 推送到 `completion-listener`
 
-> 强制 wrapper: `spawn_acp_with_watcher.py`
->
-> 对**用户可见终态**的 ACP 长任务，直接裸 `sessions_spawn(runtime="acp")` 视为违规启动；仅允许用于本地 smoke / 调试 / 不需要 watcher 的内部实验。
+Agent 只需正常使用 `sessions_spawn`，无需任何额外步骤。
 
-#### 最小注册模板 (推荐 wrapper)
+#### 数据流
 
-> **注意**：以下脚本为内部实现示例。开源用户需自行实现任务注册逻辑，或参考 `examples/task_state_machine.py` 中的状态管理示例。
-
-```bash
-# 内部实现示例（需自行开发）
-python3 <YOUR_FRAMEWORK_HOME>/skills/task_callback_bus/scripts/spawn_acp_with_watcher.py \
-  --task-id <task_id> \
-  --task-subject "<任务主题>" \
-  --prompt-file <prompt_file> \
-  --reply-to channel:<channel_id> \
-  --owner main \
-  --silent-until-terminal
 ```
-
-wrapper 自动生成:
-- `status_file`: `<YOUR_FRAMEWORK_HOME>/shared-context/job-status/<task_id>.json`
-- `report_file`: `<YOUR_FRAMEWORK_HOME>/shared-context/job-status/reports/<task_id>.md`
-
-#### 最小注册模板 (手动注册 - 备选)
-
-```bash
-# 内部实现示例（需自行开发）
-python3 <YOUR_FRAMEWORK_HOME>/skills/task_callback_bus/scripts/register_generic_task.py \
-  --task-id <task_id> \
-  --task-type sessions_spawn \
-  --status-file <status_file> \
-  --output-file <report_file> \
-  --reply-to channel:<channel_id> \
-  --owner main \
-  --task-subject <subject> \
-  --silent-until-terminal
+Agent 调用 sessions_spawn(runtime="acp", task="...")
+    ↓ (before_tool_call hook 自动拦截)
+spawn-interceptor:
+    1. 生成 task_id
+    2. 记录到 task-log.jsonl (status: "spawning")
+    3. 注入完成回调到 ACP prompt
+    ↓
+ACP Agent 执行任务
+    ↓ (完成时)
+ACP Agent 调用 sessions_send:
+    sessionKey: "agent:main:completion-relay"
+    message: { type: "acp_completion", taskId, status, summary }
+    ↓
+completion-listener → 更新 task-log → 通知用户
 ```
 
 #### ACP worker 最小落盘要求
-- 启动即写 `status_file.state=started`
-- 中间阶段写 `reviewing / implementing / testing / finalizing`
-- 终态必须写 `completed / failed / timeout`
-- 终态必须有 `report_file`
 
-#### 验收要求
-如果 ACP 报告已经生成，但 watcher 没有终态通知，默认判定为：
-**监控注册缺失或链路不完整**，而不是“watcher 自己会发现”。
+ACP Agent 收到注入的回调指令后：
+- 执行完成时必须调用 `sessions_send` 推送完成通知
+- 通知包含 `taskId`、`status`（completed/failed）、`summary`
 
----
+#### 验证
+
+```bash
+# 检查 plugin 是否加载
+openclaw plugins list | grep spawn-interceptor
+
+# 检查 task-log 记录
+tail -20 ~/.openclaw/shared-context/monitor-tasks/task-log.jsonl
+
+# 检查 completion-listener
+grep completion /tmp/completion-relay.log | tail -10
+```
+
+#### 对比旧方案
+
+| 维度 | 旧方案（wrapper + 手动注册） | 新方案（plugin 自动拦截） |
+|------|---------------------------|-------------------------|
+| Agent 负担 | 必须记住用 wrapper | 零负担，正常用原生工具 |
+| 注册方式 | 手动脚本 | 自动（hook 拦截） |
+| 通知延迟 | 5 分钟轮询 | < 1 分钟事件驱动 |
+| 代码量 | ~9,600 行 | ~600 行 |
+
 
 ## 6. 共享状态与真值规则
 

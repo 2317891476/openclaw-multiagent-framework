@@ -1,70 +1,79 @@
-# 发布说明
-
-## v1.0.0 (2026-03-12)
-
-### 首次发布
-
-OpenClaw 多 Agent 协作框架首个开源版本，包含完整的协议文档与协作规范。
+# Release Notes
 
 ---
 
-### 包含内容
+## v2.0.0 — 通信层重设计 (2026-03-12)
 
-| 文档 | 说明 |
-|------|------|
-| `README.md` | 框架概述与快速导航 |
-| `GETTING_STARTED.md` | MVP 与进阶能力接入指引 |
-| `QUICKSTART.md` | 15 分钟快速部署指南 |
-| `AGENT_PROTOCOL.md` | 完整协作协议规范 |
-| `ARCHITECTURE.md` | 架构设计与技术细节 |
-| `TEMPLATES.md` | 派单/ACK/Final/Follow-up 模板 |
-| `CAPABILITY_LAYERS.md` | L1/L2/L3 能力分层说明 |
-| `INTERNAL_VS_OSS.md` | 开源包与内部运行版差异说明 |
-| `CONTRIBUTING.md` | 贡献指南与提交流程 |
+### 核心变更：从文件轮询到拦截 + 回调
+
+**问题背景**：
+1. ACP 任务完成后没有可靠通知机制（ACP `notifyChannel` bug - Issue #40272）
+2. `sessions_spawn` timeout 语义歧义（Issue #28053）
+3. Agent 忘记执行监控步骤（LLM 固有局限）
+
+为解决这三个问题，之前自建了 ~9,600 行的 `task_callback_bus`（文件轮询架构），现替换为 ~600 行的 plugin + listener 方案。
+
+### 新增
+
+- **spawn-interceptor plugin**（`plugins/spawn-interceptor/`）
+  - 自动拦截 `sessions_spawn` 调用
+  - 记录到 `task-log.jsonl`
+  - 为 ACP 任务注入完成回调指令
+  - 符合 OpenClaw plugin 规范（`register(api)` + `openclaw.plugin.json`）
+
+- **completion-listener**（`examples/completion-relay/`）
+  - 监听 `agent:main:completion-relay` session
+  - 解析完成通知并更新 task-log
+  - 可扩展到 Discord/Telegram
+
+- **COMMUNICATION_ISSUES.md**
+  - 核心设计文档，完整记录问题、方案、架构和实现
+
+- **QUICKSTART.md v3**
+  - 全面重写，5 分钟部署 plugin + listener
+  - 涵盖验证、故障排查、清单
+
+### 变更
+
+- **ARCHITECTURE.md**：新增"通信层改进"章节
+- **ANTIPATTERNS.md**：新增 #11 文件轮询反模式、#12 文档约束反模式
+- **README.md**：重写为 plugin + 协议框架定位
+- **GETTING_STARTED.md**：更新决策树和 MVP 集合
+- **INTERNAL_VS_OSS.md**：反映开源包已包含可运行代码
+- **CONTRIBUTING.md**：更新贡献范围和代码规范
+
+### 移除
+
+- `examples/mini-watcher/`（文件轮询反模式）
+- `examples/task_state_machine.py`（已由 plugin 替代）
+- `examples/test-protocol.sh`（已过时）
+- `PROJECT_STATUS.md`（内部文档不应开源）
+
+### 代码量对比
+
+| 方案 | 行数 | 文件数 |
+|------|------|--------|
+| task_callback_bus（旧） | ~9,600 | ~40+ |
+| spawn-interceptor + completion-relay（新） | ~600 | 6 |
+
+### 测试
+
+- completion-relay: 15 个测试
+- l2_capabilities: 35 个测试
+- 全部通过
 
 ---
 
-### 核心特性
+## v1.0.0 — 协议框架初版 (2026-03-12)
 
-- **ACK 守门协议** — 3 秒内确认，建立协作节奏
-- **handoff 标准模板** — Request/ACK/Final 三段式派单
-- **状态落盘机制** — `shared-context/` 真值管理
-- **每日反思→次日落地** — follow-ups 文件化追踪
-- **能力分层** — L1(默认)/L2(增强)/L3(需 Core 改动) 清晰分界
+### 新增
 
----
-
-### 适用场景
-
-- 3+ Agent 团队协作
-- 需要异步任务追踪
-- 任务可追溯、可审计
-- 从单 Agent 向多 Agent 扩展
-
----
-
-### 已知限制
-
-- 开源包为**文档框架**，不含内部实现代码
-- 需自行实现 `task-watcher` 等 L2 增强组件
-- 详见 [INTERNAL_VS_OSS.md](INTERNAL_VS_OSS.md)
-
----
-
-### 后续计划
-
-- [ ] 视频教程
-- [ ] 更多使用示例
-- [ ] 社区最佳实践收集
-- [ ] 与 OpenClaw Core L3 能力对接
-
----
-
-### 反馈渠道
-
-- GitHub Issues: https://github.com/lanyasheng/openclaw-multiagent-framework/issues
-- OpenClaw Discord: https://discord.gg/clawd
-
----
-
-*首次发布于 2026-03-12*
+- **AGENT_PROTOCOL.md**: 五角色 Agent 协作协议
+- **ARCHITECTURE.md**: 三层架构（L1/L2/L3）
+- **QUICKSTART.md**: 快速开始指南
+- **CAPABILITY_LAYERS.md**: 能力分层模型
+- **ANTIPATTERNS.md**: 常见反模式（10 条）
+- **TEMPLATES.md**: 标准消息模板
+- **GETTING_STARTED.md**: 开源接入指引
+- **examples/**: protocol_messages.py, l2_capabilities.py
+- **tests/**: 35 个测试用例

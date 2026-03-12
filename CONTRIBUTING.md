@@ -1,55 +1,85 @@
-# Contributing
+# 贡献指南
 
-感谢你改进 `openclaw-multiagent-framework`。
+> Version: 2026-03-12-v2
 
 ## 贡献范围
 
-欢迎提交：
-- 文档修正
-- 示例补充
-- 接入指引优化
-- 术语统一
-- 开源包与内部运行版差异说明补充
+当前仓库包含：
 
-当前仓库以 **协议、模板、文档框架** 为主；内部实现代码暂不在本仓库直接维护。
+| 类型 | 路径 | 说明 |
+|------|------|------|
+| **Plugin 代码** | `plugins/spawn-interceptor/` | Node.js OpenClaw plugin |
+| **Python 工具** | `examples/completion-relay/` | 完成通知监听器 |
+| **Python 演示** | `examples/l2_capabilities.py` | L2 能力参考实现 |
+| **单元测试** | `examples/*/tests/` | 50 个测试用例 |
+| **协议文档** | `*.md` | 多 Agent 协作规范 |
 
-## 提交流程
+欢迎对以上所有内容提 PR。
 
-1. Fork 仓库
-2. 创建分支
-   ```bash
-   git checkout -b docs/improve-readme
-   ```
-3. 提交修改
-   ```bash
-   git commit -m "docs: improve README navigation"
-   ```
-4. 推送分支并创建 PR
+---
 
-## 建议的提交粒度
+## 如何贡献
 
-请尽量保持 **小步提交**：
-- 一个 commit 只解决一个主题
-- 文档修正与结构重构尽量分开
-- 若修改了示例命令，请同时更新相关说明文档
+### 1. Fork & Clone
 
-## 文档修改检查清单
+```bash
+git clone https://github.com/<your-fork>/openclaw-multiagent-framework.git
+cd openclaw-multiagent-framework
+```
 
-- [ ] README / QUICKSTART / GETTING_STARTED 之间的命令一致
-- [ ] 路径使用统一命名
-- [ ] 占位符写法一致（如 `<task_id>` / `<channel-id>`）
-- [ ] 中英文术语没有互相冲突
-- [ ] 若修改能力分层，同时更新 `CAPABILITY_LAYERS.md`
+### 2. 开发
 
-## Issues
+- **Plugin 修改**：编辑 `plugins/spawn-interceptor/index.js`
+- **Listener 修改**：编辑 `examples/completion-relay/completion_listener.py`
+- **文档修改**：编辑对应 `.md` 文件
 
-请优先使用 Issue 模板：
-- Bug Report
-- Feature Request
+### 3. 测试
 
-## 设计原则
+```bash
+# completion-relay 测试
+cd examples/completion-relay && python3 -m pytest tests/ -v
 
-1. **协议优先**：先把协作规则讲清楚
-2. **小步可用**：优先最小可用集合，再谈完整产品化
-3. **脱敏优先**：开源内容不包含内部敏感配置
-4. **真值清晰**：明确区分文档框架、内部实现、Core 缺口
+# L2 能力测试
+cd examples && python3 -m pytest tests/test_l2_capabilities.py -v
+```
+
+### 4. 提交
+
+- **Commit 格式**：`<type>: <description>`
+  - `feat:` 新功能
+  - `fix:` Bug 修复
+  - `docs:` 文档更新
+  - `test:` 测试补充
+  - `refactor:` 重构
+- **PR 描述**：说明改了什么、为什么改、如何验证
+
+---
+
+## 代码规范
+
+### Python
+
+- Python 3.10+
+- 仅使用标准库（无外部依赖）
+- Type hints 推荐
+- docstring 推荐
+
+### Node.js (Plugin)
+
+- CommonJS（`module.exports`）
+- 遵循 OpenClaw plugin API（`register(api)` 导出）
+- 无外部 npm 依赖
+
+### 文档
+
+- Markdown 格式
+- 包含 `Version:` 标记
+- 代码块指定语言
+
+---
+
+## 反馈
+
+- **Bug 报告**：GitHub Issues，包含复现步骤
+- **功能建议**：GitHub Issues，包含使用场景
+- **问题讨论**：GitHub Discussions

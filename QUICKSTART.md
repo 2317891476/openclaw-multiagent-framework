@@ -4,7 +4,7 @@
 <!-- 前置: README.md -->
 <!-- 后续: AGENT_PROTOCOL.md -->
 
-> Version: 2026-03-12-v2
+> Version: 2026-03-12-v3
 > 适用对象：已有 OpenClaw 部署，想要引入多 Agent 协作规范
 
 ---
@@ -23,7 +23,7 @@
 
 ## 5 分钟快速部署
 
-### 步骤 1：创建必要目录（1 分钟）
+### 步骤 1：创建必要目录
 
 ```bash
 export FRAMEWORK_HOME=${FRAMEWORK_HOME:-~/.openclaw}
@@ -31,44 +31,39 @@ export FRAMEWORK_HOME=${FRAMEWORK_HOME:-~/.openclaw}
 mkdir -p $FRAMEWORK_HOME/shared-context/{job-status,monitor-tasks,dispatches,intel,followups,archive/protocol-history}
 ```
 
-### 步骤 2：复制框架文档（1 分钟）
+### 步骤 2：克隆仓库
 
 ```bash
-export FRAMEWORK_HOME=${FRAMEWORK_HOME:-~/.openclaw}
-
 git clone https://github.com/lanyasheng/openclaw-multiagent-framework.git
-cp -r openclaw-multiagent-framework/* $FRAMEWORK_HOME/shared-context/
 ```
 
-### 步骤 3：运行端到端演示（1 分钟）
+### 步骤 3：安装 spawn-interceptor plugin
 
 ```bash
-cd openclaw-multiagent-framework/examples/mini-watcher
-python3 demo.py
+# 复制 plugin 到 OpenClaw plugins 目录
+cp -r openclaw-multiagent-framework/plugins/spawn-interceptor ~/.openclaw/plugins/
+
+# 用 openclaw CLI 安装（需要 --link 保持本地联动）
+openclaw plugins install --link ~/.openclaw/plugins/spawn-interceptor
+
+# 重启 Gateway
+launchctl kickstart -k gui/$(id -u)/ai.openclaw.gateway
 ```
 
-你应该看到完整的生命周期：
-
-```
-==============================================================
-  Mini-Watcher End-to-End Demo
-==============================================================
-
-[1/3] Task registered: demo-001
-[2/3] Background worker started (will take ~12s)
-[3/3] Watcher polling every 2 seconds...
-------------------------------------------------------------
-22:42:01 [watcher] INFO [UPDATE] [demo-001] registered -> started | Worker initialized
-22:42:05 [watcher] INFO [UPDATE] [demo-001] started -> in_progress | Analyzing data...
-22:42:11 [watcher] INFO [OK] [demo-001] in_progress -> completed | Analysis complete
-------------------------------------------------------------
-
-Task reached terminal state: completed
+验证 plugin 加载：
+```bash
+openclaw plugins list | grep spawn-interceptor
+# 应显示 status: loaded
 ```
 
-> 这不是模拟脚本——`demo.py` 使用了和生产环境同构的 JSONL 存储、文件锁、状态检测和通知机制。
+### 步骤 4：部署 completion-listener
 
-### 步骤 4：配置你的 Agent 团队（2 分钟）
+```bash
+# 添加到 crontab (每分钟检查一次)
+(crontab -l 2>/dev/null; echo "*/1 * * * * cd ~/.openclaw/repos/openclaw-multiagent-framework/examples/completion-relay && python3 completion_listener.py --once >> /tmp/completion-relay.log 2>&1") | crontab -
+```
+
+### 步骤 5：配置你的 Agent 团队
 
 编辑 `$FRAMEWORK_HOME/shared-context/AGENT_PROTOCOL.md`，替换为你的团队配置：
 
@@ -85,196 +80,69 @@ Task reached terminal state: completed
 
 ---
 
-## 核心概念：3 分钟理解
+## 核心概念
 
 ```
-注册任务  →  Worker 执行  →  Watcher 轮询  →  检测状态变化  →  通知
-  │              │              │                │              │
-  ▼              ▼              ▼                ▼              ▼
-tasks.jsonl   status.json   poll_once()    state_changed?   notify()
+Agent 调用 sessions_spawn(acp)
+    ↓ (before_tool_call hook 自动拦截)
+spawn-interceptor plugin:
+    1. 记录到 task-log.jsonl
+    2. 注入完成回调到 ACP prompt
+    ↓
+ACP 子 Agent 执行任务
+    ↓ (完成时主动 sessions_send)
+completion-listener → 更新 task-log → 通知用户
 ```
 
-**整个框架围绕一个核心循环**：
-1. 任何 Agent 注册一个任务（写入 `tasks.jsonl`）
-2. 后台 Worker 执行任务，把进度写入状态文件（JSON）
-3. Watcher 定期轮询所有活跃任务的状态文件
-4. 检测到状态变化时，触发通知
-5. 任务到达终态（completed/failed/timeout）后从监控中移除
-
-`examples/mini-watcher/` 用 ~300 行 Python 实现了这个完整循环。
+**整个框架的核心是「拦截 + 回调」**：
+1. Agent 正常使用 `sessions_spawn`（无需记住额外步骤）
+2. `spawn-interceptor` plugin 自动记录任务并注入完成回调
+3. ACP 完成时主动通过 `sessions_send` 推送结果
+4. `completion-listener` 处理通知并更新状态
 
 ---
 
 ## 端到端可运行示例
 
-### 示例 1：最小 Watcher（推荐先跑这个）
+### 示例 1：completion-relay（核心示例）
 
 ```bash
-cd examples/mini-watcher
-python3 demo.py
+cd examples/completion-relay
+python3 -m pytest tests/ -v
 ```
 
-包含 4 个文件，零外部依赖：
+验证 task-log 读写、消息解析、边界条件处理。
 
-| 文件 | 作用 |
-|------|------|
-| `models.py` | Task 和 StateResult 数据模型 |
-| `store.py` | JSONL 持久化 + 文件锁 |
-| `watcher.py` | 轮询循环 + 状态检测 + 通知 |
-| `demo.py` | 端到端演示（注册 → 模拟执行 → 监控） |
+### 示例 2：L2 能力演示
 
-详见 [examples/mini-watcher/README.md](examples/mini-watcher/README.md)。
+```bash
+cd examples
+python3 -m pytest tests/test_l2_capabilities.py -v
+```
 
-### 示例 2：协议消息交互
+验证 ACK 守门、Handoff 模板、交付物结构等增强能力。
 
-验证 request/ACK/final 三段式消息格式：
+### 示例 3：协议消息交互
 
 ```bash
 python3 examples/protocol_messages.py
 ```
 
-### 示例 3：状态机
-
-独立运行状态机，理解任务生命周期中合法的状态转换：
-
-```bash
-python3 examples/task_state_machine.py
-```
-
-### 示例 4：手动注册 + 监控一个真实任务
-
-```bash
-cd examples/mini-watcher
-
-# 1. 注册一个任务
-python3 -c "
-from models import Task
-from store import TaskStore
-t = Task(task_id='my-task', owner='main', subject='测试任务',
-         status_file='/tmp/my-task-status.json')
-TaskStore('/tmp/my-tasks.jsonl').register(t)
-print('注册完成:', t.task_id)
-"
-
-# 2. 模拟 Worker 写入状态
-echo '{"state": "completed", "summary": "分析完成"}' > /tmp/my-task-status.json
-
-# 3. 运行一次 Watcher 检查
-python3 watcher.py --once --tasks-file /tmp/my-tasks.jsonl
-```
+验证 request/ACK/final 三段式消息格式。
 
 ---
 
-## 状态文件 Schema
+## 验证 plugin 工作
 
-### 最小状态文件
+```bash
+# 触发一个 ACP 任务后，检查 task-log
+tail -f ~/.openclaw/shared-context/monitor-tasks/task-log.jsonl
+```
 
+你应该看到类似输出：
 ```json
-{
-  "state": "completed",
-  "summary": "任务已完成"
-}
+{"taskId":"tsk_20260312120000_abc123","agentId":"main","runtime":"acp","task":"分析报告...","spawnedAt":"2026-03-12T12:00:00.000Z","status":"spawning"}
 ```
-
-### 完整 Schema
-
-```json
-{
-  "task_id": "task-YYYYMMDD-NNN",
-  "state": "completed",
-  "summary": "简短描述（用于通知）",
-  "report_file": "报告文件路径",
-  "error": "错误信息（如果有）",
-  "started_at": "2026-03-12T12:00:00",
-  "completed_at": "2026-03-12T12:05:00",
-  "metadata": {}
-}
-```
-
-### 状态值
-
-| 状态 | 终态？ | 说明 |
-|------|--------|------|
-| `started` | 否 | 任务已启动 |
-| `running` / `in_progress` | 否 | 执行中 |
-| `completed` | **是** | 成功完成 |
-| `failed` | **是** | 执行失败 |
-| `timeout` | **是** | 超时终止 |
-| `cancelled` | **是** | 手动取消 |
-
----
-
-## 作为 Cron 运行 Watcher
-
-```bash
-# 每 3 分钟轮询一次
-*/3 * * * * cd /path/to/examples/mini-watcher && python3 watcher.py --once --tasks-file ~/.openclaw/shared-context/monitor-tasks/tasks.jsonl >> /var/log/watcher.log 2>&1
-```
-
-持续轮询模式：
-
-```bash
-python3 watcher.py --loop --interval 30 --tasks-file ~/.openclaw/shared-context/monitor-tasks/tasks.jsonl
-```
-
----
-
-## 自定义扩展
-
-### 替换通知后端
-
-`watcher.py` 中的 `notify()` 函数默认写 JSON 文件。替换成任何你需要的：
-
-```python
-def notify(task, old_state, new_state, summary=""):
-    # Slack
-    requests.post(WEBHOOK, json={"text": f"[{task.task_id}] {old_state} → {new_state}"})
-    # 或 Discord / 邮件 / sessions_send / ...
-    return True
-```
-
-### 替换状态检测源
-
-默认读 JSON 文件。替换 `check_status_file()` 可接入 API、数据库等：
-
-```python
-def check_github_pr(task):
-    resp = requests.get(f"https://api.github.com/repos/.../pulls/{task.metadata['pr']}")
-    merged = resp.json().get("merged", False)
-    return StateResult(state="completed" if merged else "open", terminal=merged)
-```
-
----
-
-## 故障排查
-
-### 任务完成但没收到通知
-
-```bash
-export FRAMEWORK_HOME=${FRAMEWORK_HOME:-~/.openclaw}
-
-# 1. 任务是否注册？
-grep "your_task_id" $FRAMEWORK_HOME/shared-context/monitor-tasks/tasks.jsonl
-
-# 2. 状态文件是否存在且格式正确？
-cat $FRAMEWORK_HOME/shared-context/job-status/your_task_id.json
-# 必须包含 {"state": "completed"} 而不是 {"status": "done"}
-
-# 3. Watcher 日志
-tail -50 $FRAMEWORK_HOME/shared-context/monitor-tasks/watcher.log
-
-# 4. 通知文件是否已生成？
-ls $FRAMEWORK_HOME/shared-context/monitor-tasks/notifications/ | grep your_task_id
-```
-
-### 常见错误
-
-| 症状 | 原因 | 修复 |
-|------|------|------|
-| `ModuleNotFoundError` | 不在 mini-watcher 目录 | `cd examples/mini-watcher` |
-| 任务未检测到 | status_file 路径不对 | 检查注册时的 `status_file` 是否指向实际文件 |
-| state 检测不到终态 | 字段名错误 | 用 `"state"` 不是 `"status"`；值用 `"completed"` 不是 `"done"` |
-| 重复通知 | Watcher 未更新 last_notified_state | 确认 store 写入成功（检查文件锁） |
 
 ---
 
@@ -298,33 +166,61 @@ ls $FRAMEWORK_HOME/shared-context/monitor-tasks/notifications/ | grep your_task_
 
 预期流程：
 1. 接收方回复 ACK
-2. 注册 task-watcher
-3. sessions_spawn(mode="run") 启动后台任务
-4. 任务完成后写 status_file + report_file
-5. Watcher 推送 terminal 通知
+2. sessions_spawn (plugin 自动记录 + 注入回调)
+3. ACP 完成后 sessions_send 回推结果
+4. completion-listener 推送通知
 ```
+
+---
+
+## 故障排查
+
+### 任务完成但没收到通知
+
+```bash
+# 1. plugin 是否加载？
+openclaw plugins list | grep spawn-interceptor
+
+# 2. task-log 是否有记录？
+tail -20 ~/.openclaw/shared-context/monitor-tasks/task-log.jsonl
+
+# 3. completion-listener 是否在运行？
+grep completion /tmp/completion-relay.log | tail -10
+
+# 4. Gateway 错误日志
+tail -20 ~/.openclaw/logs/gateway.err.log | grep spawn-interceptor
+```
+
+### 常见错误
+
+| 症状 | 原因 | 修复 |
+|------|------|------|
+| plugin 未加载 | 缺少 `openclaw.plugin.json` | 确认 `plugins/spawn-interceptor/` 包含所有文件 |
+| hooks 未注册 | `register()` 导出格式不对 | 检查 `index.js` 使用 `module.exports = { register(api) {...} }` |
+| task-log 无记录 | plugin 未拦截 | 确认 Gateway 重启后日志显示 "hooks registered" |
+| ACP 完成无通知 | prompt 注入的回调未执行 | 检查 ACP Agent 是否有 `sessions_send` 权限 |
 
 ---
 
 ## 验证清单
 
-- [ ] `python3 examples/mini-watcher/demo.py` 运行成功
+- [ ] `openclaw plugins list` 显示 spawn-interceptor 为 loaded
+- [ ] Gateway 日志显示 "spawn-interceptor: hooks registered"
+- [ ] `python3 -m pytest examples/completion-relay/tests/ -v` 全部通过
 - [ ] 所有 Agent 已阅读 AGENT_PROTOCOL.md
 - [ ] 必要目录已创建（`shared-context/{job-status,monitor-tasks,...}`）
 - [ ] 首次短任务派单测试通过
-- [ ] 首次长任务异步测试通过
-- [ ] Watcher cron/loop 已配置
-- [ ] 团队配置已更新
+- [ ] completion-listener cron 已配置
 
 ---
 
 ## 下一步
 
-1. **跑完 demo** → 理解核心循环
-2. **阅读完整协议** → [AGENT_PROTOCOL.md](AGENT_PROTOCOL.md)
-3. **理解架构** → [ARCHITECTURE.md](ARCHITECTURE.md)
-4. **能力分层** → [CAPABILITY_LAYERS.md](CAPABILITY_LAYERS.md)（L1/L2/L3 区分）
-5. **扩展 Watcher** → 替换 notify/check 函数，接入你的通知后端
+1. **阅读完整协议** → [AGENT_PROTOCOL.md](AGENT_PROTOCOL.md)
+2. **理解架构** → [ARCHITECTURE.md](ARCHITECTURE.md)
+3. **能力分层** → [CAPABILITY_LAYERS.md](CAPABILITY_LAYERS.md)（L1/L2/L3 区分）
+4. **通信层设计** → [COMMUNICATION_ISSUES.md](COMMUNICATION_ISSUES.md)（核心设计文档）
+5. **踩坑避雷** → [ANTIPATTERNS.md](ANTIPATTERNS.md)
 
 ---
 

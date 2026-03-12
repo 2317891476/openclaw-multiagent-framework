@@ -4,7 +4,7 @@
 <!-- 前置: AGENT_PROTOCOL.md -->
 <!-- 后续: TEMPLATES.md -->
 
-> Version: 2026-03-12-v1
+> Version: 2026-03-12-v2
 
 ---
 
@@ -35,12 +35,13 @@
 
 **职责**：长任务执行、状态变化通知、终态回推
 
-**工具**：`task-watcher` + `sessions_spawn(mode="run")`
+**工具**：`spawn-interceptor` plugin + `completion-listener`
 
 **特点**：
 - 适用于 >10 秒的长任务
-- 后台执行，终态自动推送
-- 状态文件 + 报告文件双落盘
+- `spawn-interceptor` 自动拦截 `sessions_spawn` 并记录到 task-log
+- ACP 任务自动注入完成回调，完成时通过 `sessions_send` 回推结果
+- `completion-listener` 处理通知并更新 task-log 状态
 
 ### 3. 共享状态面 (Shared State Plane)
 
@@ -53,7 +54,7 @@
 shared-context/
 ├── AGENT_PROTOCOL.md      # 统一协作协议（唯一真值）
 ├── job-status/            # 任务状态追踪
-├── monitor-tasks/         # 监控任务注册
+├── monitor-tasks/         # task-log.jsonl（plugin 自动写入）
 ├── dispatches/            # 派单记录
 ├── intel/                 # 跨 Agent 情报共享
 ├── followups/             # 每日反思落地追踪
@@ -63,73 +64,6 @@ shared-context/
 ---
 
 ## 数据流架构
-
-```mermaid
-flowchart TB
-    subgraph User["用户/触发源"]
-        U[用户请求 / Cron / 事件]
-    end
-
-    subgraph Main["主 Agent (main/Zoe)"]
-        M1[接收请求]
-        M2[ACK 确认]
-        M3[任务判断]
-        M4[派单决策]
-    end
-
-    subgraph Control["控制面 sessions_send"]
-        C1[发送 Request]
-        C2[接收 ACK]
-        C3[接收 Final]
-    end
-
-    subgraph Agents["专业 Agent 团队"]
-        A1[trading]
-        A2[ainews]
-        A3[macro]
-        A4[content]
-        A5[butler]
-    end
-
-    subgraph Async["异步回执面 task-watcher"]
-        W1[注册 watcher]
-        W2[后台执行]
-        W3[写 status/report]
-        W4[terminal push]
-    end
-
-    subgraph State["共享状态面 shared-context/*"]
-        S1[job-status/]
-        S2[dispatches/]
-        S3[intel/]
-        S4[followups/]
-    end
-
-    U --> M1
-    M1 --> M2
-    M2 --> M3
-    M3 -->|<= 10 秒 | M4
-    M3 -->|> 10 秒 | W1
-    
-    M4 --> C1
-    C1 --> A1 & A2 & A3 & A4 & A5
-    A1 & A2 & A3 & A4 & A5 --> C2
-    C2 --> M4
-    A1 & A2 & A3 & A4 & A5 --> C3
-    
-    W1 --> W2
-    W2 --> W3
-    W3 --> S1 & S2
-    W3 --> W4
-    W4 --> M4
-    
-    C3 --> S1 & S2 & S3
-    M4 --> S4
-```
-
----
-
-## 任务执行流程
 
 ### 短任务流程（<= 10 秒）
 
@@ -147,25 +81,147 @@ sequenceDiagram
     M->>U: 结果
 ```
 
-### 长任务流程（> 10 秒）
+### 长任务流程（> 10 秒）— 拦截 + 回调架构
 
 ```mermaid
 sequenceDiagram
     participant U as 用户
     participant M as main
-    participant W as task-watcher
-    participant A as Agent
+    participant P as spawn-interceptor
+    participant ACP as ACP Agent
+    participant L as completion-listener
     
     U->>M: 请求
     M->>M: ACK（立即）
-    M->>W: 注册 watcher
-    M->>A: sessions_spawn(mode=run)
-    note over A: 后台异步执行
-    A->>W: 写 status_file
-    A->>W: 写 report_file
-    A->>W: terminal 状态
-    W->>U: 主动推送结果
+    M->>M: sessions_spawn(acp)
+    P->>P: hook 拦截: 记录 task-log + 注入回调
+    M->>ACP: ACP 启动（含回调指令）
+    note over ACP: 异步执行任务
+    ACP->>ACP: sessions_send(completion)
+    L->>L: 监听 completion-relay session
+    L->>L: 更新 task-log 状态
+    L->>U: 通知（stdout/Discord/Telegram）
 ```
+
+### 数据流总览
+
+```mermaid
+flowchart TB
+    subgraph User["用户/触发源"]
+        U[用户请求 / Cron / 事件]
+    end
+
+    subgraph Main["主 Agent (main)"]
+        M1[接收请求]
+        M2[ACK 确认]
+        M3[任务判断]
+        M4[派单决策]
+    end
+
+    subgraph Control["控制面 sessions_send"]
+        C1[发送 Request]
+        C2[接收 ACK]
+        C3[接收 Final]
+    end
+
+    subgraph Agents["专业 Agent 团队"]
+        A1[Agent A]
+        A2[Agent B]
+        A3[Agent C]
+    end
+
+    subgraph Plugin["spawn-interceptor plugin"]
+        P1[拦截 sessions_spawn]
+        P2[记录 task-log.jsonl]
+        P3[注入完成回调]
+    end
+
+    subgraph Listener["completion-listener"]
+        L1[监听 completion session]
+        L2[解析完成通知]
+        L3[更新 task-log + 通知]
+    end
+
+    subgraph State["共享状态面 shared-context/*"]
+        S1[job-status/]
+        S2[dispatches/]
+        S3[intel/]
+        S4[followups/]
+        S5[monitor-tasks/task-log.jsonl]
+    end
+
+    U --> M1
+    M1 --> M2
+    M2 --> M3
+    M3 -->|短任务| M4
+    M3 -->|长任务| P1
+    
+    M4 --> C1
+    C1 --> A1 & A2 & A3
+    A1 & A2 & A3 --> C2
+    C2 --> M4
+    A1 & A2 & A3 --> C3
+    
+    P1 --> P2
+    P2 --> S5
+    P1 --> P3
+    P3 -->|ACP 执行| A1
+    A1 -->|sessions_send 完成| L1
+    L1 --> L2
+    L2 --> L3
+    L3 --> S5
+    
+    C3 --> S1 & S2 & S3
+    M4 --> S4
+```
+
+---
+
+## 通信层架构：拦截 + 回调
+
+> 详见 [COMMUNICATION_ISSUES.md](COMMUNICATION_ISSUES.md) 完整设计文档
+
+### 解决的核心问题
+
+| 问题 | 根因 | 解决方案 |
+|------|------|----------|
+| ACP 完成不通知 | OpenClaw Bug #40272 | prompt 注入完成回调 |
+| timeout 语义模糊 | `sessions_send` 只有 ok/timeout | task-log 确定性追踪 |
+| Agent 忘记注册监控 | LLM 肌肉记忆 | `before_tool_call` hook 自动拦截 |
+
+### 架构决策
+
+**为什么不用文件轮询**：
+- 行业共识：轮询用于编排是反模式
+- 延迟高（最坏 5 分钟）
+- 代码量大（旧方案 ~9,600 行 vs 新方案 ~600 行）
+
+**为什么不用 Lobster（OpenClaw 内建 YAML 工作流引擎）**：
+- Lobster 适合确定性同步流程
+- 我们需要异步完成通知 + 灵活的 LLM 编排
+- 可共存：确定性流程用 Lobster，异步任务用 plugin
+
+**为什么不用主流编排框架（LangGraph/CrewAI/AutoGen）**：
+- OpenClaw 是 Agent Runtime（非 Python 编排框架）
+- 引入外部框架会破坏 OpenClaw 的 session 管理
+- plugin 机制是 OpenClaw 原生的扩展方式
+
+### 实现位置
+
+| 组件 | 路径 | 语言 | 行数 |
+|------|------|------|------|
+| spawn-interceptor | `plugins/spawn-interceptor/` | Node.js | ~150 |
+| completion-listener | `examples/completion-relay/` | Python | ~200 |
+| 设计文档 | `COMMUNICATION_ISSUES.md` | — | — |
+
+### 代码量对比
+
+| 维度 | 旧方案 (task_callback_bus) | 新方案 |
+|------|---------------------------|--------|
+| 核心代码 | ~9,600 行 Python | ~600 行 (JS + Python) |
+| 轮询频率 | 每 5 分钟 | 无轮询（事件驱动） |
+| 注册方式 | Agent 手动 / wrapper | 自动（plugin hook） |
+| 通知延迟 | 最坏 5 分钟 | < 1 分钟 |
 
 ---
 
@@ -175,15 +231,12 @@ sequenceDiagram
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: 创建
-    pending --> confirmed: ACK
-    confirmed --> in_progress: 开始执行
-    in_progress --> completed: 成功
-    in_progress --> failed: 失败
-    in_progress --> superseded: 被替代
+    [*] --> spawning: plugin 记录
+    spawning --> in_progress: ACP 开始执行
+    in_progress --> completed: sessions_send 完成通知
+    in_progress --> failed: sessions_send 失败通知
     completed --> [*]
     failed --> [*]
-    superseded --> [*]
 ```
 
 ### 控制面消息状态
@@ -229,7 +282,16 @@ stateDiagram-v2
 - 验收时优先检查文件产物
 - 聊天回执仅作为辅助参考
 
-### 4. 反思落地闭环模式
+### 4. 自动拦截模式（v2 新增）
+
+**问题**：Agent 总是忘记手动注册监控。
+
+**方案**：
+- 用 `before_tool_call` hook 自动拦截 `sessions_spawn`
+- Agent 继续使用原生工具，无需记住额外步骤
+- 系统层保障 > 文档约束
+
+### 5. 反思落地闭环模式
 
 **问题**：每日反思流于形式，次日无实际动作。
 
@@ -253,8 +315,7 @@ stateDiagram-v2
 
 1. 定义任务触发条件
 2. 确定执行阈值（同步/异步）
-3. 设计状态文件 schema
-4. 注册 watcher（如需要）
+3. plugin 自动追踪（无需额外配置）
 
 ### 集成外部系统
 
@@ -278,9 +339,9 @@ stateDiagram-v2
 - 密钥不进入共享区
 
 ### 审计追踪
-- 所有任务有 status_file
-- 所有结论有 report_file
-- 所有变更有日志
+- 所有 ACP 任务自动记录到 task-log.jsonl
+- 控制面消息有 ack_id 追踪
+- 完成通知有时间戳和状态
 
 ---
 
@@ -298,7 +359,7 @@ stateDiagram-v2
 
 ### 响应优化
 - ACK 优先，结果后补
-- 渐进式结果推送
+- 事件驱动通知（< 1 分钟延迟）
 - 超时自动降级
 
 ---
@@ -306,7 +367,7 @@ stateDiagram-v2
 ## 故障恢复
 
 ### 任务失败
-1. 记录失败原因到 status_file
+1. completion-listener 记录失败到 task-log
 2. 通知相关方
 3. 决定重试/降级/放弃
 
@@ -315,10 +376,10 @@ stateDiagram-v2
 2. 切换到备用 Agent
 3. 记录状态变更
 
-### 状态不一致
-1. 以 shared-context/ 文件为准
-2. 重新同步聊天历史
-3. 修复不一致状态
+### Plugin 异常
+1. Gateway 日志检查 `spawn-interceptor` 错误
+2. 降级：手动追踪任务
+3. 修复后 `launchctl kickstart` 重启 Gateway
 
 ---
 
@@ -328,48 +389,3 @@ stateDiagram-v2
 - 重大变更升级主版本
 - 小改进升级次版本
 - 历史版本归档到 archive/
-
-
----
-
-## 通信层改进：从轮询到拦截+回调 (2026-03-12)
-
-> 详见 [COMMUNICATION_ISSUES.md](COMMUNICATION_ISSUES.md) 完整分析
-
-### 核心问题
-
-| 问题 | 根因 | 旧方案 | 新方案 |
-|------|------|--------|--------|
-| ACP 完成不通知 | OpenClaw Bug #40272 | 文件轮询 watcher (5min) | prompt 注入完成回调 |
-| timeout 语义模糊 | sessions_send 只有 ok/timeout | 猜 + 重试 | task-log 确定性追踪 |
-| Agent 忘记注册 | LLM 肌肉记忆 | 文档约束 | before_tool_call 自动拦截 |
-
-### 新架构数据流
-
-```
-Agent -> sessions_spawn(acp)
-    | (before_tool_call hook auto-intercept)
-spawn-interceptor plugin:
-    1. Log to task-log.jsonl
-    2. Inject completion relay into ACP prompt
-    |
-ACP sub-agent executes task
-    | (on completion)
-ACP -> sessions_send -> completion-relay session
-    |
-completion-listener -> update task-log -> notify user
-```
-
-### 代码量对比
-
-| | 旧方案 (task_callback_bus) | 新方案 |
-|---|---|---|
-| 核心代码 | 9,600 行 Python | ~600 行 (JS + Python) |
-| 轮询频率 | 每 5 分钟 | 无轮询 (事件驱动) |
-| 注册方式 | Agent 手动 / wrapper | 自动 (plugin hook) |
-| 通知延迟 | 最坏 5 分钟 | < 1 分钟 |
-
-### 实现位置
-
-- `plugins/spawn-interceptor/` — OpenClaw plugin (Node.js)
-- `examples/completion-relay/` — 完成监听器 (Python)
