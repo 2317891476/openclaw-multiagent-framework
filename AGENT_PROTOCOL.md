@@ -167,7 +167,7 @@ grep completion /tmp/completion-relay.log | tail -10
 | Agent 负担 | 必须记住用 wrapper | 零负担，正常用原生工具 |
 | 注册方式 | 手动脚本 | 自动（hook 拦截） |
 | 通知延迟 | 5 分钟轮询 | < 1 分钟事件驱动 |
-| 代码量 | ~9,600 行 | ~600 行 |
+| 代码量 | ~2,543 行 (v1.1.0, 含 DLQ/Terminal Bridge/Guardrail) | ~600 行 |
 
 
 ## 6. 共享状态与真值规则

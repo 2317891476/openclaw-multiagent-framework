@@ -185,7 +185,7 @@ See [QUICKSTART.md](QUICKSTART.md) and [GETTING_STARTED.md](GETTING_STARTED.md) 
 
 Sources:
   1. spawn-interceptor plugin  → internal ACP/subagent tasks (auto-tracked)
-  2. task_callback_bus watcher  → external async tasks (browser, social media, etc.)
+  2. task-callback-bus WatcherBus  → external async tasks (browser, social media, etc.)
 
 Consumers:
   - completion-listener (poll & notify)

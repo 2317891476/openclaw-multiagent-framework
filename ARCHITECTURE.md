@@ -4,7 +4,7 @@
 <!-- 前置: AGENT_PROTOCOL.md -->
 <!-- 后续: TEMPLATES.md -->
 
-> Version: 2026-03-12-v2
+> Version: 2026-03-13-v3
 
 ---
 
@@ -196,7 +196,7 @@ flowchart TB
 **为什么不用文件轮询**：
 - 行业共识：轮询用于编排是反模式
 - 延迟高（最坏 5 分钟）
-- 代码量大（旧方案 ~9,600 行 vs 新方案 ~600 行）
+- 代码量大（旧方案 ~2,543 行 (v1.1.0, 含 DLQ/Terminal Bridge/Guardrail) vs 新方案 ~600 行）
 
 **为什么不用 Lobster（OpenClaw 内建 YAML 工作流引擎）**：
 - Lobster 适合确定性同步流程
@@ -218,9 +218,9 @@ flowchart TB
 
 ### 代码量对比
 
-| 维度 | 旧方案 (task_callback_bus) | 新方案 |
+| 维度 | 旧方案 (task-callback-bus) | 新方案 |
 |------|---------------------------|--------|
-| 核心代码 | ~9,600 行 Python | ~600 行 (JS + Python) |
+| 核心代码 | ~2,543 行 (v1.1.0, 含 DLQ/Terminal Bridge/Guardrail) Python | ~600 行 (JS + Python) |
 | 轮询频率 | 每 5 分钟 | 无轮询（事件驱动） |
 | 注册方式 | Agent 手动 / wrapper | 自动（plugin hook） |
 | 通知延迟 | 最坏 5 分钟 | < 1 分钟 |
@@ -405,8 +405,8 @@ v2.3 引入了统一的 `task-log.jsonl` 作为所有任务事件的单一事实
 | spawn-interceptor (L1: subagent_ended) | `subagent` | `subagent_ended_hook` |
 | spawn-interceptor (L2: ACP session poller) | `acp` | `acp_session_poller` |
 | spawn-interceptor (L3: stale reaper) | 任意 | `stale_reaper` |
-| task_callback_bus watcher (状态变化) | `external` | `watcher_state_change` |
-| task_callback_bus watcher (任务关闭) | `external` | `watcher_close` |
+| task-callback-bus WatcherBus (状态变化) | `external` | `watcher_state_change` |
+| task-callback-bus WatcherBus (任务关闭) | `external` | `watcher_close` |
 
 ### 读取方
 

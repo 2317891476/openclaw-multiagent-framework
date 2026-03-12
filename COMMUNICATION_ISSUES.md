@@ -64,7 +64,7 @@ Agent: "好的，我已经启动发帖任务并设置了监控。"
 
 ### 1.2 当前补偿方案的代价
 
-为了补偿这三个问题，我们自建了 `task_callback_bus`：
+为了补偿这三个问题，我们自建了 `task-callback-bus`：
 
 | 组件 | 行数 | 用途 |
 |------|------|------|
@@ -81,7 +81,7 @@ Agent: "好的，我已经启动发帖任务并设置了监控。"
 | deduplicator.py | 100 | 去重器 |
 | agent_comm_guardrail.py | 383 | ACK 守门 |
 | 其他 | ~2,700 | 各种辅助 |
-| **合计** | **~9,600** | — |
+| **合计** | **~2,543** | — |
 
 加上 13 个脚本文件，每 5 分钟 cron 轮询，以及 ~1,000 行协议文档。
 
@@ -93,7 +93,7 @@ Agent: "好的，我已经启动发帖任务并设置了监控。"
 |------|--------|------|
 | ggondim (Lobster) | ~300 行 | 只解决同步编排，不解决异步监控 |
 | MFS Corp (Discord) | ~0 行 | 不用 ACP，不需要异步回调 |
-| **我们 (callback_bus)** | **~9,600 行** | 三个痛点的完整补偿 |
+| **我们 (callback_bus)** | **~2,543 行 (v1.1.0, 含 DLQ/Terminal Bridge/Guardrail)** | 三个痛点的完整补偿 |
 | **本方案目标** | **~800 行** | 用 plugin hook 做自动化，砍掉轮询 |
 
 ---
@@ -103,7 +103,7 @@ Agent: "好的，我已经启动发帖任务并设置了监控。"
 1. **可靠的完成通知**: ACP 任务完成后，主 Agent 和用户必须收到通知
 2. **明确的任务状态**: 消除 timeout 的歧义，提供清晰的状态追踪
 3. **零认知负担**: Agent 不需要记住额外步骤，系统自动处理注册和回调
-4. **最小代码量**: 从 9,600 行降到 ~800 行
+4. **最小代码量**: 从 2,543 行降到 ~800 行
 5. **与开源框架集成**: 方案可直接在 github 仓库中使用
 
 ---
@@ -238,7 +238,7 @@ def check_completion_relay():
 ```
 当前方案:
   Agent → wrapper → tasks.jsonl → cron(5min) → 扫描 status_file → notifier → Discord
-  (5 步, 最坏延迟 5 分钟, 9,600 行代码)
+  (5 步, 最坏延迟 5 分钟, 2,543 行代码)
 
 新方案:
   Agent → [hook 自动拦截] → sessions_spawn(+注入回调) → ACP → sessions_send(完成) → listener → Discord
@@ -255,7 +255,7 @@ def check_completion_relay():
 | task-log (models + store) | ~150 | 替换 models.py + stores.py (精简版) |
 | 配置文件 | ~50 | openclaw.json plugin 配置 |
 | 测试 | ~250 | 新增测试 |
-| **合计** | **~830** | **替换 9,600 行** |
+| **合计** | **~830** | **替换 2,543 行** |
 
 ---
 
@@ -280,7 +280,7 @@ def check_completion_relay():
 1. 并行运行新旧方案
 2. 对比通知可靠性
 3. 确认无遗漏后停用 watcher cron
-4. 精简 task_callback_bus
+4. task-callback-bus v1.1.0 已完成精简 (WatcherBus + DLQ + Terminal Bridge + Guardrail, 共 2,543 行)
 
 ---
 
@@ -312,14 +312,14 @@ def check_completion_relay():
 
 ### 6.1 Zoe 需要知道的关键信息
 
-1. **你们的 9,600 行 watcher 代码是在补偿 OpenClaw ACP 的已知 Bug (Issue #40272)**
+1. **你们的 2,543 行 watcher 代码是在补偿 OpenClaw ACP 的已知 Bug (Issue #40272)**
 2. **文件轮询是行业公认的反模式**——社区没有人这么做
 3. **OpenClaw 已有 before_tool_call hook**——可以实现零认知负担的自动注册
 4. **最关键的改变**：不再要求 Agent "记住用 wrapper"，改为系统自动拦截
 
 ### 6.2 Zoe 需要停止做的
 
-- ❌ 继续在 task_callback_bus 上增加功能（如 acp_guard.py, dispatch_consumer.py 等）
+- ❌ 继续在 task-callback-bus 上增加功能（如 acp_guard.py, dispatch_consumer.py 等）
 - ❌ 继续优化文件轮询的性能
 - ❌ 继续强化 AGENT_PROTOCOL.md 中的文档约束
 

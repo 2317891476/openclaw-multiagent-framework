@@ -35,7 +35,7 @@
 
 | 组件 | 说明 | 开源替代 |
 |------|------|----------|
-| `task_callback_bus/` (9,600 行) | 旧版文件轮询监控 | spawn-interceptor plugin (150 行) |
+| `task-callback-bus/` (2,543 行) | 事件驱动任务监控 (WatcherBus + DLQ + Terminal Bridge + Agent Guardrail) | spawn-interceptor plugin (150 行) |
 | `discord_task_panel.py` | Discord 面板实现 | 自行实现 |
 | `terminal_bridge.py` | follow-up 桥接 | 自行实现 |
 | `heartbeat-guardian.sh` | Guardian 自愈脚本 | 自行实现 |
