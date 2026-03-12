@@ -6,7 +6,7 @@
 >
 > 统一、高效、可追溯的多 Agent 团队协作协议与架构模式，解决 ACP 异步通信不可靠、Agent 遗忘任务注册、timeout 语义模糊三大痛点。
 
-**Version**: 2026-03-13-v5
+**Version**: 2026-03-13-v6
 **License**: MIT
 **Status**: Production Ready (internally validated) / OSS Ready
 **Author**: lanyasheng (OpenClaw Community)
@@ -171,6 +171,33 @@ See [QUICKSTART.md](QUICKSTART.md) and [GETTING_STARTED.md](GETTING_STARTED.md) 
 │   └── protocol_messages.py   # Protocol message format demo
 └── ...
 ```
+
+---
+
+## Unified Monitoring / 统一监控
+
+`task-log.jsonl` is the single source of truth for all task completion events, regardless of origin:
+
+`task-log.jsonl` 是所有任务完成事件的唯一事实源，无论来源：
+
+```
+~/.openclaw/shared-context/monitor-tasks/task-log.jsonl
+
+Sources:
+  1. spawn-interceptor plugin  → internal ACP/subagent tasks (auto-tracked)
+  2. task_callback_bus watcher  → external async tasks (browser, social media, etc.)
+
+Consumers:
+  - completion-listener (poll & notify)
+  - any script reading JSONL
+```
+
+| Field | Description |
+|-------|------------|
+| `taskId` | Unique task identifier |
+| `runtime` | `acp` / `subagent` / `external` |
+| `status` | `spawning` / `completed` / `failed` / `timeout` |
+| `completionSource` | `acp_session_poller` / `subagent_ended_hook` / `stale_reaper` / `watcher_close` / `watcher_state_change` |
 
 ---
 

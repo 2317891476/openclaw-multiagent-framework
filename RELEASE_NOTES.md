@@ -23,9 +23,18 @@
 | L2 | ACP session poller | `runtime=acp` session 关闭 | ~15s |
 | L3 | Stale reaper | 任何 runtime 超过 30min | 30min |
 
+### 统一 task-log.jsonl
+
+`task-log.jsonl` 成为所有任务事件的单一事实源:
+- spawn-interceptor 写入 ACP/subagent 内部任务的状态
+- task_callback_bus watcher 写入外部异步任务（浏览器/社交媒体等）的状态
+- completion-listener 只需监听一个文件即可获取所有完成事件
+
 ### 验证结果
 - 模拟测试: 注入 pending ACP 任务 + 已关闭 acpx session → 启动时立即检测到完成（match=0s）
 - 历史回溯: 之前卡住的真实 ACP 任务也被正确标记为 completed（match=9s）
+- 真实 ACP 任务: 大龙虾触发的 ACP 任务被 poller 正确检测到完成（match=43s）
+- watcher bridge: 外部任务状态变化正确写入 task-log.jsonl
 
 ---
 

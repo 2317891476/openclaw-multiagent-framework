@@ -391,3 +391,28 @@ stateDiagram-v2
 - 重大变更升级主版本
 - 小改进升级次版本
 - 历史版本归档到 archive/
+
+---
+
+## 统一监控: task-log.jsonl
+
+v2.3 引入了统一的 `task-log.jsonl` 作为所有任务事件的单一事实源。
+
+### 写入方
+
+| 来源 | runtime 值 | completionSource |
+|------|-----------|------------------|
+| spawn-interceptor (L1: subagent_ended) | `subagent` | `subagent_ended_hook` |
+| spawn-interceptor (L2: ACP session poller) | `acp` | `acp_session_poller` |
+| spawn-interceptor (L3: stale reaper) | 任意 | `stale_reaper` |
+| task_callback_bus watcher (状态变化) | `external` | `watcher_state_change` |
+| task_callback_bus watcher (任务关闭) | `external` | `watcher_close` |
+
+### 读取方
+
+- `completion-listener`：增量读取 `task-log.jsonl`，通过 `.relay-cursor-v2` 记录进度
+- 任意外部脚本：按 JSONL 格式逐行解析
+
+### 格式
+
+每行一个 JSON 对象，必含字段：`taskId`, `status`, `completionSource`。其余字段按来源补充。
