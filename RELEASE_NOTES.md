@@ -2,6 +2,28 @@
 
 ---
 
+## v2.2.0 — Completion 回传修复 + 防御增强 (2026-03-13)
+
+### 核心修复
+- **completion 回传闭环修复**: 用 subagent_ended hook 作为 PRIMARY 完成检测机制
+  - 之前依赖 prompt 注入 sessions_send 指令，但 ACP agent 完成主任务后直接退出
+  - 现在 subagent_ended 是系统事件，由 Gateway 自动触发，不依赖 agent 行为
+- **Stale Task Reaper**: 每 5 分钟扫描，超过 30 分钟未完成的自动标记 timeout
+- **持久化 pending state**: .pending-tasks.json 确保 Gateway 重启不丢失追踪状态
+- **completion_listener v2**: 直接从 task-log.jsonl 读取完成状态
+
+### 防御机制
+| 场景 | 防御 |
+|------|------|
+| 正常完成 | subagent_ended hook → completed |
+| Gateway 断开 | 持久化恢复 + stale reaper → timeout |
+| ACP 崩溃 | subagent_ended(reason=error) → failed |
+
+### 已知 OpenClaw Bug
+新增 Bug 追踪章节：#34054, #35886, #40243, #40272
+
+---
+
 ## v2.0.0 — 通信层重设计 (2026-03-12)
 
 ### 核心变更：从文件轮询到拦截 + 回调

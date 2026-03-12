@@ -98,7 +98,7 @@ sequenceDiagram
     M->>ACP: ACP 启动（含回调指令）
     note over ACP: 异步执行任务
     ACP->>ACP: sessions_send(completion)
-    L->>L: 监听 completion-relay session
+    L->>L: 监听 task-log.jsonl 新完成记录
     L->>L: 更新 task-log 状态
     L->>U: 通知（stdout/Discord/Telegram）
 ```

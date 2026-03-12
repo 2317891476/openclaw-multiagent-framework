@@ -6,7 +6,7 @@
 >
 > 统一、高效、可追溯的多 Agent 团队协作协议与架构模式，解决 ACP 异步通信不可靠、Agent 遗忘任务注册、timeout 语义模糊三大痛点。
 
-**Version**: 2026-03-13-v3
+**Version**: 2026-03-13-v4
 **License**: MIT
 **Status**: Production Ready (internally validated) / OSS Ready
 **Author**: lanyasheng (OpenClaw Community)
@@ -47,10 +47,12 @@ spawn-interceptor plugin:
     2. Inject completion callback instruction into ACP prompt
     |
 ACP Sub-Agent executes task
-    | (on completion)
-ACP -> sessions_send -> completion-relay session
+    | (on completion — system event, not agent action)
+Gateway fires subagent_ended hook
     |
-completion-listener -> Update task-log -> Notify user
+spawn-interceptor -> Update task-log (completed/failed) -> Notify
+    |
+    + Stale reaper: marks tasks as timeout if no event within 30min
 ```
 
 **Zero cognitive load**: Agents don't need to remember any extra steps — the system handles everything automatically.

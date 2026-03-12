@@ -1,6 +1,6 @@
 {
   "name": "spawn-interceptor",
-  "version": "1.0.0",
+  "version": "2.2.0",
   "description": "Auto-tracks sessions_spawn calls and injects ACP completion relay",
   "main": "index.js",
   "keywords": [
