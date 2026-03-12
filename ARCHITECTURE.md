@@ -328,3 +328,48 @@ stateDiagram-v2
 - 重大变更升级主版本
 - 小改进升级次版本
 - 历史版本归档到 archive/
+
+
+---
+
+## 通信层改进：从轮询到拦截+回调 (2026-03-12)
+
+> 详见 [COMMUNICATION_ISSUES.md](COMMUNICATION_ISSUES.md) 完整分析
+
+### 核心问题
+
+| 问题 | 根因 | 旧方案 | 新方案 |
+|------|------|--------|--------|
+| ACP 完成不通知 | OpenClaw Bug #40272 | 文件轮询 watcher (5min) | prompt 注入完成回调 |
+| timeout 语义模糊 | sessions_send 只有 ok/timeout | 猜 + 重试 | task-log 确定性追踪 |
+| Agent 忘记注册 | LLM 肌肉记忆 | 文档约束 | before_tool_call 自动拦截 |
+
+### 新架构数据流
+
+```
+Agent -> sessions_spawn(acp)
+    | (before_tool_call hook auto-intercept)
+spawn-interceptor plugin:
+    1. Log to task-log.jsonl
+    2. Inject completion relay into ACP prompt
+    |
+ACP sub-agent executes task
+    | (on completion)
+ACP -> sessions_send -> completion-relay session
+    |
+completion-listener -> update task-log -> notify user
+```
+
+### 代码量对比
+
+| | 旧方案 (task_callback_bus) | 新方案 |
+|---|---|---|
+| 核心代码 | 9,600 行 Python | ~600 行 (JS + Python) |
+| 轮询频率 | 每 5 分钟 | 无轮询 (事件驱动) |
+| 注册方式 | Agent 手动 / wrapper | 自动 (plugin hook) |
+| 通知延迟 | 最坏 5 分钟 | < 1 分钟 |
+
+### 实现位置
+
+- `plugins/spawn-interceptor/` — OpenClaw plugin (Node.js)
+- `examples/completion-relay/` — 完成监听器 (Python)
