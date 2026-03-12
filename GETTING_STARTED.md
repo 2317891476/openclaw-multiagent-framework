@@ -134,9 +134,10 @@ mkdir -p $FRAMEWORK_HOME/shared-context/{job-status,dispatches,intel,followups}
 - 可配置 Discord/Telegram 等渠道
 
 **引入方式**：
-1. 参考 `QUICKSTART.md` 注册测试任务
-2. 自行实现 watcher 或参考内部代码
-3. 配置通知渠道
+1. 运行 `examples/mini-watcher/demo.py` 理解完整链路
+2. 将 `examples/mini-watcher/` 复制到你的项目中
+3. 替换 `notify()` 函数接入你的通知渠道（Discord/Slack/Webhook）
+4. 配置 cron 或 loop 模式持续运行（见 QUICKSTART.md）
 
 ### 2. follow-up/dispatch bridge
 
@@ -242,6 +243,8 @@ mkdir -p $FRAMEWORK_HOME/shared-context/{job-status,dispatches,intel,followups}
 
 ## 常见引入误区
 
+> 更多真实踩坑案例见 [ANTIPATTERNS.md](ANTIPATTERNS.md)（10 个从内部运营中提炼的案例）
+
 ### ❌ 误区 1：一次性引入全部能力
 
 **问题**：想一步到位，结果团队适应成本过高
@@ -332,11 +335,16 @@ MVP (第 1 周) → 习惯养成 (第 2-3 周) → 自动化 (第 4 周+)
 
 完成 MVP 部署后，建议：
 
-1. **运行测试任务**：验证 watcher 注册和状态追踪
+1. **运行端到端 Demo**：验证 watcher 注册和状态追踪
    ```bash
-   bash scripts/test-framework.sh
+   cd examples/mini-watcher && python3 demo.py
    ```
-   > **注意**：此脚本为内部实现示例，开源用户需参考 [QUICKSTART.md](QUICKSTART.md) 自行实现。
+
+2. **运行单元测试**：确认所有组件正常工作
+   ```bash
+   cd examples/mini-watcher && python3 -m pytest tests/ -v
+   cd examples && python3 -m pytest tests/ -v
+   ```
 
 2. **阅读完整协议**：深入理解 `AGENT_PROTOCOL.md`
 

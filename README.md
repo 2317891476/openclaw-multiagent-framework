@@ -71,7 +71,9 @@ open GETTING_STARTED.md
 | `ARCHITECTURE.md` | 架构设计和技术细节 | 6 |
 | `TEMPLATES.md` | 消息和文件模板 | 7 |
 | `CAPABILITY_LAYERS.md` | 能力分层表 (L1/L2/L3) | 8 |
-| `examples/` | 协议实现示例代码 | 9 |
+| `ANTIPATTERNS.md` | 踩坑实录（10 个真实案例） | 9 |
+| `TESTING.md` | 测试架构与运行指南（114 tests） | 10 |
+| `examples/` | 可运行的协议实现示例代码 | 11 |
 | `CONTRIBUTING.md` | 贡献方式与提交流程 | 10 |
 
 ---
@@ -260,13 +262,24 @@ openclaw-multiagent-framework/
 ├── ARCHITECTURE.md
 ├── TEMPLATES.md
 ├── CAPABILITY_LAYERS.md
+├── ANTIPATTERNS.md
+├── TESTING.md
 ├── CONTRIBUTING.md
 ├── .github/ISSUE_TEMPLATE/
 └── examples/
     ├── README.md
+    ├── mini-watcher/           # ★ 可运行的最小 watcher 实现
+    │   ├── models.py
+    │   ├── store.py
+    │   ├── watcher.py
+    │   ├── demo.py             # 端到端演示 (python3 demo.py)
+    │   └── tests/              # 79 个单元测试
+    ├── l2_capabilities.py      # L2 增强能力示例 (ACK/Handoff/Bridge)
     ├── protocol_messages.py    # 消息协议实现
     ├── task_state_machine.py   # 状态机实现
-    └── test-protocol.sh        # 协议测试脚本
+    ├── test-protocol.sh        # 协议测试脚本
+    └── tests/
+        └── test_l2_capabilities.py  # L2 能力测试 (35 tests)
 ```
 
 ---
