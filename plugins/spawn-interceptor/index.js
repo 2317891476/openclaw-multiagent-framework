@@ -2,19 +2,45 @@
  * spawn-interceptor — OpenClaw plugin for automatic ACP task tracking.
  *
  * Hooks:
- *   before_tool_call: intercepts sessions_spawn to inject completion relay
- *   subagent_ended: logs when sub-agents finish
+ *   before_tool_call: intercepts sessions_spawn to log and inject completion relay
+ *   subagent_ended: updates task status when sub-agents finish (primary completion detection)
+ *
+ * The subagent_ended hook is the PRIMARY completion mechanism — it fires reliably
+ * when OpenClaw terminates an ACP/subagent session, regardless of whether the agent
+ * itself executed sessions_send. The prompt-injected relay is a best-effort enhancement.
+ *
+ * Pending tasks are persisted to disk so Gateway restarts don't lose tracking state.
  *
  * Install: openclaw plugins install --link ~/.openclaw/plugins/spawn-interceptor
  */
 
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 const SHARED_CTX = path.join(os.homedir(), '.openclaw', 'shared-context');
 const TASK_LOG = path.join(SHARED_CTX, 'monitor-tasks', 'task-log.jsonl');
+const PENDING_FILE = path.join(SHARED_CTX, 'monitor-tasks', '.pending-tasks.json');
 const COMPLETION_SESSION = 'agent:main:completion-relay';
+
+let pendingTasks = new Map();
+
+function loadPending() {
+  try {
+    if (fs.existsSync(PENDING_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf-8'));
+      pendingTasks = new Map(Object.entries(data));
+    }
+  } catch { /* start fresh */ }
+}
+
+function savePending() {
+  try {
+    const dir = path.dirname(PENDING_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(PENDING_FILE, JSON.stringify(Object.fromEntries(pendingTasks), null, 2));
+  } catch { /* non-fatal */ }
+}
 
 function genId() {
   const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
@@ -22,24 +48,29 @@ function genId() {
   return `tsk_${ts}_${r}`;
 }
 
-function log(entry) {
+function appendLog(entry) {
   const dir = path.dirname(TASK_LOG);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.appendFileSync(TASK_LOG, JSON.stringify(entry) + '\n');
 }
 
 function relay(taskId) {
-  return `\n\n---\n[COMPLETION RELAY]\nWhen ALL work is done, execute sessions_send with:\n  sessionKey: "${COMPLETION_SESSION}"\n  message: JSON with fields:\n    type: "acp_completion"\n    taskId: "${taskId}"\n    status: "completed" or "failed"\n    summary: one-sentence result\n---`;
+  return `\n\n---\n[COMPLETION RELAY — OPTIONAL]\nIf possible, after completing all work, call sessions_send with:\n  sessionKey: "${COMPLETION_SESSION}"\n  message: {"type":"acp_completion","taskId":"${taskId}","status":"completed or failed","summary":"one-sentence result"}\nThis is optional — completion is also tracked automatically.\n---`;
 }
 
-module.exports = {
+const spawnInterceptorPlugin = {
   id: 'spawn-interceptor',
   name: 'Spawn Interceptor',
   description: 'Auto-tracks sessions_spawn and injects ACP completion relay',
-  version: '1.0.0',
+  version: '2.1.0',
 
   register(api) {
-    api.logger.info('spawn-interceptor: registering hooks');
+    api.logger.info('spawn-interceptor v2.1: registering hooks (subagent_ended as primary, persistent pending state)');
+
+    loadPending();
+    if (pendingTasks.size > 0) {
+      api.logger.info(`spawn-interceptor: restored ${pendingTasks.size} pending task(s) from disk`);
+    }
 
     api.on('before_tool_call', (event, ctx) => {
       if (event.toolName !== 'sessions_spawn') return;
@@ -48,35 +79,92 @@ module.exports = {
       const id = genId();
       const rt = p.runtime || 'subagent';
 
-      log({
+      const taskEntry = {
         taskId: id,
         agentId: ctx.agentId || '?',
         sessionKey: ctx.sessionKey || '',
         runtime: rt,
         task: String(p.task || '').slice(0, 200),
         spawnedAt: new Date().toISOString(),
-        status: 'spawning'
-      });
+        status: 'spawning',
+      };
+
+      appendLog(taskEntry);
+
+      pendingTasks.set(id, taskEntry);
+      savePending();
+
+      api.logger.info(`spawn-interceptor: tracked task ${id} (runtime=${rt}, pending=${pendingTasks.size})`);
 
       if (rt === 'acp' && p.task) {
-        api.logger.info(`spawn-interceptor: injecting relay for task ${id} (acp)`);
         return { params: { ...p, task: p.task + relay(id) } };
       }
     });
 
     api.on('subagent_ended', (event, ctx) => {
-      log({
-        event: 'subagent_ended',
-        targetSessionKey: event.targetSessionKey || '?',
-        targetKind: event.targetKind || 'unknown',
-        reason: event.reason || '',
-        outcome: event.outcome || '',
-        agentId: ctx.runId || '?',
-        endedAt: new Date().toISOString()
-      });
-      api.logger.info(`spawn-interceptor: subagent ended (${event.targetSessionKey}, ${event.reason})`);
+      const targetKey = event.targetSessionKey || '';
+      const reason = event.reason || '';
+      const outcome = event.outcome || '';
+      const endedAt = new Date().toISOString();
+
+      let matchedTaskId = null;
+      let matchedTask = null;
+
+      for (const [taskId, task] of pendingTasks.entries()) {
+        if (targetKey.includes(':acp:') && task.runtime === 'acp') {
+          matchedTaskId = taskId;
+          matchedTask = task;
+          break;
+        }
+        if (targetKey.includes(':subagent:') && task.runtime === 'subagent') {
+          matchedTaskId = taskId;
+          matchedTask = task;
+          break;
+        }
+      }
+
+      const completionStatus = (outcome === 'ok' || reason === 'subagent-complete')
+        ? 'completed'
+        : 'failed';
+
+      if (matchedTaskId && matchedTask) {
+        pendingTasks.delete(matchedTaskId);
+        savePending();
+
+        const completionEntry = {
+          taskId: matchedTaskId,
+          agentId: matchedTask.agentId,
+          sessionKey: matchedTask.sessionKey,
+          runtime: matchedTask.runtime,
+          task: matchedTask.task,
+          spawnedAt: matchedTask.spawnedAt,
+          status: completionStatus,
+          completedAt: endedAt,
+          completionSource: 'subagent_ended_hook',
+          reason,
+          outcome,
+          targetSessionKey: targetKey,
+        };
+
+        appendLog(completionEntry);
+        api.logger.info(`spawn-interceptor: task ${matchedTaskId} → ${completionStatus} (via subagent_ended, pending=${pendingTasks.size})`);
+      } else {
+        appendLog({
+          event: 'subagent_ended',
+          targetSessionKey: targetKey,
+          targetKind: event.targetKind || 'unknown',
+          reason,
+          outcome,
+          agentId: ctx.runId || '?',
+          endedAt,
+          matchedTask: false,
+        });
+        api.logger.info(`spawn-interceptor: subagent ended (${targetKey}, ${reason}) — no matching pending task`);
+      }
     });
 
-    api.logger.info('spawn-interceptor: hooks registered');
-  }
+    api.logger.info('spawn-interceptor v2.1: hooks registered');
+  },
 };
+
+export default spawnInterceptorPlugin;
