@@ -236,19 +236,57 @@ def poll_one(task, store):
 
 ---
 
-## 附：踩坑检查清单
+---
 
-部署前过一遍，能避免 80% 的常见问题：
+## 11. 文件轮询做异步编排
 
+**症状**：cron 每 5 分钟扫描 status_file 检测任务完成，watcher 报 degraded，notifications_sent: 0
+
+**为什么是反模式**：
+- 行业共识：文件轮询用于多 Agent 编排是反模式（Confluent, Zylos 等均有论述）
+- 社区无人使用此方式：Lobster 用确定性 YAML、MFS Corp 用 Discord 实时通信
+- 延迟高（最坏 5 分钟）、空轮询浪费、难以扩展
+
+**正确做法**：
+- 用 plugin hook (`before_tool_call`) 自动追踪任务
+- 用 prompt 注入让 ACP 完成时主动 `sessions_send` 通知
+- 或等 OpenClaw Core 修复 ACP notifyChannel (Issue #40272)
+
+**一句话**：别轮询文件，让任务完成时主动通知你。
+
+---
+
+## 12. 文档约束代替系统约束
+
+**症状**：AGENT_PROTOCOL.md 明确写了"必须用 wrapper"，但 Agent 仍然裸 spawn
+
+**为什么是反模式**：
+- LLM 的"肌肉记忆"指向 L1 原生工具 (`sessions_spawn`)
+- 文档规则写在 AGENT_PROTOCOL.md 深处，LLM 注意力有限
+- "请你记住做 X" ≠ "系统自动做 X"
+
+**正确做法**：
+- 用 `before_tool_call` plugin hook 自动拦截
+- Agent 继续用 `sessions_spawn`（保留肌肉记忆）
+- 系统透明地完成注册和回调注入
+
+**一句话**：如果一个行为是强制的，它就不应该是可选的。
+
+---
+
+## 更新后的踩坑检查清单
+
+部署前过一遍：
+
+- [ ] 安装了 `spawn-interceptor` plugin？
 - [ ] 内部协作用 `sessions_send`，不是 `message`？
-- [ ] 状态文件用 `"state"` 字段，值是 `completed/failed/timeout`？
-- [ ] 注册时 `status_file` 用了绝对路径？
-- [ ] 长任务设了 `expires_at`？
-- [ ] 有定期 compact `tasks.jsonl` 的机制？
-- [ ] `notify()` 失败时不更新 `last_notified_state`？
-- [ ] Adapter 验证是功能验证而不只是名字验证？
+- [ ] 有 `completion-listener` 在运行（cron 或 loop）？
+- [ ] 长任务设了超时？
 - [ ] timeout 处理是"先调查"而不是"先重试"？
+- [ ] 没有用文件轮询做异步编排？
+- [ ] 没有依赖文档约束让 Agent "记住"额外步骤？
 
 ---
 
 *基于 2026-03-08 ~ 2026-03-12 内部团队运营经验整理*
+*2026-03-12 更新：新增反模式 #11 (文件轮询) 和 #12 (文档约束)*

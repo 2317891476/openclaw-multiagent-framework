@@ -1,106 +1,49 @@
 # Examples
 
-Reference implementations demonstrating the OpenClaw Agent Protocol concepts.
+可运行的协议实现和工具示例。
 
-## mini-watcher/ (Start Here)
+## 核心示例
 
-**A complete, runnable task monitoring system in ~300 lines of Python.**
+### completion-relay/ (推荐)
 
-This is the recommended starting point — it implements the core watcher pattern (poll → detect → notify) with zero external dependencies.
-
-```bash
-cd examples/mini-watcher
-python3 demo.py
-```
-
-| File | Purpose |
-|------|---------|
-| `models.py` | Task and StateResult dataclasses |
-| `store.py` | JSONL persistence with file locking |
-| `watcher.py` | Poll loop, state detection, notification |
-| `demo.py` | End-to-end demo with simulated worker |
-| `README.md` | Detailed docs, extension patterns |
-
-See [mini-watcher/README.md](mini-watcher/README.md) for customization (replace notify backend, add API state sources, run as cron).
-
----
-
-## protocol_messages.py
-
-Message format implementation per AGENT_PROTOCOL.md.
-
-**Demonstrates:**
-- Agent identity format (`agent:<name>:<transport>:<channel>`)
-- Handoff message creation (Section 4)
-- ACK message handling (Section 4.2)
-- Message parsing and validation
+ACP 完成通知监听器。配合 `spawn-interceptor` plugin 使用，监听 ACP 子 Agent 的完成回调并转发通知。
 
 ```bash
-python3 examples/protocol_messages.py
+# 单次检查
+python3 completion-relay/completion_listener.py --once
+
+# 持续监听
+python3 completion-relay/completion_listener.py --loop --interval 60
 ```
 
-### Usage
+15 个单元测试: `python3 -m pytest completion-relay/tests/ -v`
 
-```python
-from examples.protocol_messages import (
-    AgentIdentity, HandoffContext, create_handoff_message
-)
+### l2_capabilities.py
 
-sender = AgentIdentity("trading", "discord", "trading-room")
-receiver = AgentIdentity("macro", "discord", "macro-room")
-context = HandoffContext(reason="Need macro analysis", priority="high")
-msg = create_handoff_message(sender, receiver, "task_001", "Analyze FOMC", context)
-```
-
----
-
-## task_state_machine.py
-
-Task lifecycle state machine per AGENT_PROTOCOL.md Section 5.
-
-**Demonstrates:**
-- State transitions (PENDING → ACKNOWLEDGED → IN_PROGRESS → COMPLETED)
-- State validation (prevents invalid transitions)
-- Status file persistence
-- Terminal states (COMPLETED, FAILED, CANCELLED)
+6 个 L2 增强能力的演示实现：ACK 协议、Handoff 模板、交付物分层、单写入者规则、Follow-up 桥接、每日反思管线。
 
 ```bash
-python3 examples/task_state_machine.py
+python3 l2_capabilities.py
 ```
 
-### Usage
+35 个单元测试: `python3 -m pytest tests/test_l2_capabilities.py -v`
 
-```python
-from examples.task_state_machine import TaskStateMachine, TaskState
+### protocol_messages.py
 
-task = TaskStateMachine("task_001", "trading")
-task.transition_to(TaskState.ACKNOWLEDGED, "Task accepted")
-task.mark_started("Fetching data...")
-task.mark_completed(report_file="report.md")
-```
-
----
-
-## test-protocol.sh
-
-Shell-based protocol validation script.
+协议消息格式（request/ack/final）的构造和解析演示，对应 AGENT_PROTOCOL.md 规范。
 
 ```bash
-chmod +x examples/test-protocol.sh
-./examples/test-protocol.sh
+python3 protocol_messages.py
 ```
 
----
+## 已废弃
 
-## Environment Variables
+以下示例已在 v2 中移除：
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENCLAW_STATUS_DIR` | `./shared-context/job-status` | Status file location |
-| `OPENCLAW_NOTIFICATION_DIR` | `./shared-context/monitor-tasks/notifications` | Notification output |
+| 示例 | 移除原因 | 替代方案 |
+|------|----------|----------|
+| mini-watcher/ | 基于文件轮询（行业反模式） | completion-relay/ + spawn-interceptor plugin |
+| task_state_machine.py | 基于旧 watcher 状态机 | spawn-interceptor 自动追踪 |
+| test-protocol.sh | 过时的测试脚本 | completion-relay/tests/ |
 
-## Notes
-
-- `mini-watcher/` is production-quality — the same pattern runs in the internal system
-- Other examples are reference implementations for understanding the protocol
-- See AGENT_PROTOCOL.md for full specification, ARCHITECTURE.md for system design
+详见 [COMMUNICATION_ISSUES.md](../COMMUNICATION_ISSUES.md) 了解为什么从文件轮询迁移到 plugin hook + 完成回调。
