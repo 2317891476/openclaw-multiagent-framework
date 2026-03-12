@@ -69,6 +69,9 @@ bash scripts/test-framework.sh
 | `ARCHITECTURE.md` | 架构设计和技术细节 | 4 |
 | `TEMPLATES.md` | 消息和文件模板 | 5 |
 | `CAPABILITY_LAYERS.md` | 能力分层表 (L1/L2/L3) | 6 |
+| `INTERNAL_VS_OSS.md` | 开源包 vs 内部运行版差异 | 7 |
+| `GETTING_STARTED.md` | 接入指引（MVP / 进阶集合） | 8 |
+| `CONTRIBUTING.md` | 贡献方式与提交流程 | 9 |
 
 ---
 
@@ -242,7 +245,28 @@ bash scripts/test-framework.sh
 
 ---
 
+## 📁 仓库结构
+
+```text
+openclaw-multiagent-framework/
+├── README.md
+├── QUICKSTART.md
+├── GETTING_STARTED.md
+├── INTERNAL_VS_OSS.md
+├── AGENT_PROTOCOL.md
+├── ARCHITECTURE.md
+├── TEMPLATES.md
+├── CAPABILITY_LAYERS.md
+├── CONTRIBUTING.md
+├── .github/ISSUE_TEMPLATE/
+└── scripts/test-framework.sh
+```
+
+---
+
 ## 🤝 贡献指南
+
+完整贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ### 报告问题
 
