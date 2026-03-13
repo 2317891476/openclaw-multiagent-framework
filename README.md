@@ -104,6 +104,112 @@ Our completion detection uses a **four-layer defensive architecture** that handl
 | "Intermediate states from hook" | Intermediate states come from Layer 1 native event stream, not hook. |
 | "Plugin auto-closes loop" | Plugin enables tracking. Content-aware completer validates completion. |
 
+---
+
+## Communication Model & Session Boundaries
+
+Understanding how agents communicate is critical to using this framework correctly.
+
+### Core Concepts: Agent ≠ Session ≠ Thread
+
+| Concept | What It Is | What It Is NOT |
+|---------|-----------|----------------|
+| **Agent** | A configured AI entity with a system prompt and capabilities | A running process or conversation instance |
+| **Session** | A single execution context with isolated state and history | NOT automatically shared with other sessions |
+| **Thread** | A UI/conversation container (visual surface) | NOT the memory store or shared state |
+
+### Default Communication Flow
+
+```
+┌─────────┐     ┌──────────────┐     ┌─────────────────────┐     ┌──────────────┐     ┌─────────┐
+│  User   │────▶│ Orchestrator │────▶│   Worker Session(s) │────▶│ Orchestrator │────▶│  User   │
+│ (You)   │◀────│   (Zoe/Main) │◀────│  (trading/ainews/   │◀────│   (Zoe/Main) │◀────│ (You)   │
+└─────────┘     └──────────────┘     │    macro/...)        │     └──────────────┘     └─────────┘
+                                      └─────────────────────┘
+                                              │
+                                              ▼
+                                      ┌───────────────┐
+                                      │  task-log     │
+                                      │  (persistent  │
+                                      │   audit trail)│
+                                      └───────────────┘
+```
+
+**Key Points:**
+- The **Orchestrator** (typically Zoe/main agent) is the sole moderator
+- Worker sessions are spawned to handle specific tasks
+- Results flow back through the Orchestrator, not directly to the user
+- Each session has isolated memory by default
+
+### `sessions_send` vs `sessions_spawn`
+
+| Function | Purpose | Use When |
+|----------|---------|----------|
+| `sessions_spawn` | Create a NEW session with a fresh context | Starting a new task or workflow |
+| `sessions_send` | Send a message to an EXISTING session | Continuing a multi-turn conversation |
+
+**Important:**
+- `sessions_spawn` creates a new isolated session with no prior history
+- `sessions_send` requires the session to already exist (created by prior `sessions_spawn`)
+- Both functions use `sessionKey` to identify the target
+
+### Context Sharing Model
+
+**Default: Sessions are Isolated**
+
+```
+Session A                    Session B
+┌─────────┐                 ┌─────────┐
+│ History │◀───── NO ─────▶│ History │
+│ State   │   sharing      │ State   │
+└─────────┘                └─────────┘
+```
+
+**Sharing Requires Explicit Mechanisms:**
+
+| Mechanism | How It Works | Use Case |
+|-----------|--------------|----------|
+| **Prompt Injection** | Pass context in the prompt parameter | One-time context transfer |
+| **Artifacts** | Write to/read from shared files | Persistent data exchange |
+| **Resume** | Use `resume` parameter to continue | Long-running workflows |
+| **External State** | Database, JSON files, etc. | Cross-session persistence |
+
+### What This Framework Solves (and Doesn't)
+
+| Problem Solved | How | What It Is NOT |
+|----------------|-----|----------------|
+| **Task Routing** | Orchestrator dispatches to appropriate worker | NOT automatic load balancing |
+| **Isolation** | Each session runs independently | NOT a shared memory system |
+| **State Tracking** | task-log.jsonl records all state transitions | NOT a group chat simulator |
+| **Result Recovery** | Four-layer completion pipeline ensures no lost results | NOT automatic retries |
+
+### Common Misconceptions
+
+| Misconception | Reality |
+|--------------|---------|
+| "All agents share memory automatically" | **False.** Sessions are isolated by default. Sharing requires explicit prompt/artifact/resume. |
+| "UI thread = shared memory" | **False.** UI thread/channel is a visual container, not memory. State is per-session. |
+| "sessions_send talks to the same 'person'" | **False.** It sends to the same session, which has no memory of previous sessions unless resumed. |
+| "This is a group chat framework" | **False.** It's task routing and isolation, not social simulation. |
+| "spawn means create a new agent" | **False.** It creates a new session with an existing agent configuration. |
+
+### Practical Example
+
+```python
+# Zoe (Orchestrator) spawns a trading analysis task
+sessions_spawn(
+    sessionKey="agent:trading:daily-analysis",  # Unique session ID
+    agentId="trading",                           # Which agent config to use
+    prompt="Analyze BTC price action for today", # Context passed explicitly
+    mode="run",
+    streamTo="parent",                           # Enables Layer 1 event stream
+)
+
+# Later, Zoe checks results via task-log, not by assuming shared memory
+# The trading session does NOT automatically know what the macro session did
+# unless Zoe explicitly passes that context in the prompt or via artifact
+```
+
 ### spawn-interceptor Plugin (v2.4)
 
 An OpenClaw plugin (~250 lines of JavaScript) that:
