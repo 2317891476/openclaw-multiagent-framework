@@ -1,8 +1,12 @@
 # 通信层重新设计方案
 
-> Version: 2026-03-13-v2
+> Version: 2026-03-13-v9
 > Status: 已实施 (spawn-interceptor v2.4)
 > 目标: 解决 OpenClaw 多 Agent 通信的三大痛点，用最小改动量实现可靠的异步通信
+
+> **See also**:
+> - [Positioning](README.md#positioning-why-this-approach-now) — our design philosophy
+> - [Framework Comparison](README.md#what-we-borrowed-from-mainstream-frameworks) — comparison with AutoGen Core, LangGraph, CrewAI
 
 ---
 

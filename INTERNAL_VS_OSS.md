@@ -1,7 +1,9 @@
 # 开源包 vs 内部运行版差异说明
 
-> Version: 2026-03-13-v3
+> Version: 2026-03-13-v9
 > 目标：明确告知外部用户开源包与内部实际运行版本的区别
+
+> **Note**: This is a lightweight coordination layer for small-scale OpenClaw multi-agent setups. For our design philosophy and comparison with mainstream frameworks (AutoGen Core, LangGraph, CrewAI), see [Positioning](README.md#positioning-why-this-approach-now).
 
 ---
 

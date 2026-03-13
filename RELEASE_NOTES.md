@@ -3,6 +3,8 @@
 ---
 ## v2.4.0 — 通信护栏 + 死信队列 + 任务链自动化 (2026-03-13)
 
+> **Note**: This release and subsequent versions use the `spawn-interceptor` plugin architecture. The older `task-callback-bus` (~2,543 lines, file-polling based) is deprecated and not included in the open source package. See [INTERNAL_VS_OSS.md](INTERNAL_VS_OSS.md) for details.
+
 ### 新增: Dead Letter Queue (DLQ)
 
 - 当任务通知投递失败超过 3 次，自动移入死信队列 `dlq.jsonl`
@@ -174,3 +176,18 @@ task-callback-bus v1.1.0 (2,543 行, +247 行)
 - **GETTING_STARTED.md**: 开源接入指引
 - **examples/**: protocol_messages.py, l2_capabilities.py
 - **tests/**: 35 个测试用例
+
+---
+
+## Documentation Version Alignment
+
+| Document | Version | Last Updated |
+|----------|---------|--------------|
+| README.md | 2026-03-13-v9 | Positioning + Framework Comparison added |
+| ARCHITECTURE.md | 2026-03-13-v9 | Cross-references added |
+| CAPABILITY_LAYERS.md | 2026-03-13-v9 | Cross-references added |
+| INTERNAL_VS_OSS.md | 2026-03-13-v9 | Cross-references added |
+| AGENT_PROTOCOL.md | 2026-03-13-v4 | Cross-references added |
+| GETTING_STARTED.md | 2026-03-13-v3 | Cross-references added |
+| COMMUNICATION_ISSUES.md | 2026-03-13-v9 | Cross-references added |
+| CONTENT_AWARE_COMPLETER.md | 2026-03-13-v1 | Base L4 documentation |

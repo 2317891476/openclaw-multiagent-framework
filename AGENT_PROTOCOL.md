@@ -1,9 +1,11 @@
 # AGENT_PROTOCOL.md — 团队统一协作协议
 
-> Version: 2026-03-12-v3 (ACK-First 强制版 + Plugin 自动拦截)
+> Version: 2026-03-13-v4 (ACK-First 强制版 + Plugin 自动拦截)
 > Owner: main (Zoe)
 > Scope: All agents
 > Status: Canonical
+
+> **See also**: [Communication Model](README.md#communication-model--session-boundaries) for Agent/Session/Thread distinctions and [Positioning](README.md#positioning-why-this-approach-now) for design philosophy.
 
 ---
 

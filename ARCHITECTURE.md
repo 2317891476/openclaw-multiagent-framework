@@ -4,7 +4,9 @@
 <!-- 前置: AGENT_PROTOCOL.md -->
 <!-- 后续: TEMPLATES.md -->
 
-> Version: 2026-03-13-v4
+> Version: 2026-03-13-v9
+
+> **See also**: [Positioning: Why This Approach](README.md#positioning-why-this-approach-now) — our design philosophy and comparison with mainstream frameworks (AutoGen Core, LangGraph, CrewAI).
 
 ---
 

@@ -1,7 +1,9 @@
 # 开源接入指引
 
-> Version: 2026-03-12-v2
+> Version: 2026-03-13-v3
 > 目标：帮助外部用户以最小成本引入本框架
+
+> **New**: See [Positioning: Why This Approach](README.md#positioning-why-this-approach-now) for our design philosophy and how we compare to mainstream frameworks (AutoGen Core, LangGraph, CrewAI).
 
 ---
 

@@ -1,6 +1,8 @@
 # 能力分层模型
 
-> Version: 2026-03-13-v3
+> Version: 2026-03-13-v9
+
+> **See also**: [Positioning: Why This Approach](README.md#positioning-why-this-approach-now) — design philosophy for small teams vs. heavyweight frameworks.
 
 ---
 
