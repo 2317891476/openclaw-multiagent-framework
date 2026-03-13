@@ -8,6 +8,39 @@
 
 ---
 
+## Quick Summary: Communication Model at a Glance
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    ONE-SCREEN COMMUNICATION SUMMARY                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────┐     sessions_spawn()      ┌─────────────┐                     │
+│  │  User   │──────────────────────────▶│  Worker     │                     │
+│  │(Zoe/Main)│◀─────────────────────────│  Session(s) │                     │
+│  └────┬────┘     task-log.jsonl        └─────────────┘                     │
+│       │                                                                     │
+│       │  • Sessions are ISOLATED by default                                 │
+│       │  • Context sharing requires EXPLICIT mechanism                      │
+│       │    (prompt / artifact / resume / external state)                    │
+│       │                                                                     │
+│       ▼                                                                     │
+│  ┌───────────────┐                                                          │
+│  │  sessions_send │  ← Continue existing session (not spawn new)           │
+│  └───────────────┘                                                          │
+│                                                                             │
+│  KEY RULE: Agent ≠ Session ≠ Thread                                         │
+│  • Agent: Configured AI entity (trading/ainews/macro)                       │
+│  • Session: Isolated execution context (spawn = fresh start)                │
+│  • Thread: UI container (visual, not memory)                                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**In one sentence**: This framework provides task routing, isolation, and completion tracking for OpenClaw agents — not a shared memory system or group chat simulator.
+
+---
+
 ## The Problem
 
 When running multiple AI agents in OpenClaw, you quickly hit fundamental limitations:
@@ -120,6 +153,45 @@ Understanding how agents communicate is critical to using this framework correct
 
 ### Default Communication Flow
 
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e1f5fe', 'primaryTextColor': '#01579b', 'primaryBorderColor': '#0288d1', 'lineColor': '#0288d1', 'secondaryColor': '#fff3e0', 'tertiaryColor': '#e8f5e9'}}}%%
+flowchart LR
+    subgraph User["👤 User"]
+        U[You/Zoe]
+    end
+
+    subgraph Orchestrator["🎯 Orchestrator"]
+        Z[Zoe/Main Agent]
+    end
+
+    subgraph Workers["⚙️ Worker Sessions"]
+        W1[Trading]
+        W2[AINews]
+        W3[Macro]
+    end
+
+    subgraph Audit["📋 Audit Trail"]
+        TL[task-log.jsonl]
+    end
+
+    U -->|"1. Request"| Z
+    Z -->|"2. sessions_spawn()"| W1
+    Z -->|"2. sessions_spawn()"| W2
+    Z -->|"2. sessions_spawn()"| W3
+    W1 -->|"3. Results"| Z
+    W2 -->|"3. Results"| Z
+    W3 -->|"3. Results"| Z
+    Z -->|"4. Response"| U
+    Z -.->|"Log state"| TL
+
+    style User fill:#e3f2fd
+    style Orchestrator fill:#fff3e0
+    style Workers fill:#e8f5e9
+    style Audit fill:#fce4ec
+```
+
+**ASCII Version (for non-Mermaid renderers):**
+
 ```
 ┌─────────┐     ┌──────────────┐     ┌─────────────────────┐     ┌──────────────┐     ┌─────────┐
 │  User   │────▶│ Orchestrator │────▶│   Worker Session(s) │────▶│ Orchestrator │────▶│  User   │
@@ -209,6 +281,120 @@ sessions_spawn(
 # The trading session does NOT automatically know what the macro session did
 # unless Zoe explicitly passes that context in the prompt or via artifact
 ```
+
+---
+
+## Positioning: Why This Approach Now
+
+### What This Framework Is
+
+This is a **lightweight coordination layer** built on top of OpenClaw's native sessions/threads, augmented with shared files/artifacts for cross-session communication. It solves specific, concrete problems:
+
+1. **Completion detection** when OpenClaw doesn't notify you (Bug #40272)
+2. **Task registration** that agents can't forget (via plugin hooks)
+3. **State tracking** across isolated sessions (via task-log.jsonl)
+4. **Zombie session cleanup** (workaround for Bug #34054)
+
+### Design Philosophy: Fit for Current Scale
+
+For a **small team running a few agents** (e.g., trading + AI news + macro analysis), this approach prioritizes:
+
+| Principle | How We Apply It |
+|-----------|-----------------|
+| **Trust + Context** | Human oversight via Zoe as orchestrator; context passed explicitly |
+| **Point-to-point routing** | Orchestrator dispatches to specific workers by ID |
+| **Explicit handoff** | Each spawn is intentional; no automatic broadcast or subscription |
+| **Shared artifacts** | Files in `shared-context/` serve as the "shared memory" |
+| **Human oversight** | Zoe (main agent) reviews and decides; not fully autonomous |
+
+This is an **intentional choice**, not a lack of awareness of mainstream frameworks.
+
+---
+
+## What We Borrowed from Mainstream Frameworks
+
+We studied existing solutions and incorporated their insights, while staying lightweight:
+
+### Microsoft AutoGen Core
+**Reference patterns:** Topic/subscription, direct messaging + broadcast, handoffs, concurrent agents
+
+**What we adopted:**
+- The concept of an **orchestrator** coordinating multiple specialized agents
+- Explicit **handoff patterns** (Zoe decides which agent handles what)
+
+**Why we differ:**
+- AutoGen Core provides a **runtime-level message bus** with broadcast capabilities
+- We use **point-to-point routing** via `sessions_spawn` — simpler for our scale, no broadcast needed
+
+### LangGraph
+**Reference patterns:** Low-level orchestration, durable execution, human-in-the-loop, comprehensive memory
+
+**What we adopted:**
+- **Persistence layer** (task-log.jsonl as durable state)
+- **Explicit state management** rather than implicit memory
+- Recognition that **workflows need structure**, not just prompts
+
+**Why we differ:**
+- LangGraph provides **graph-based workflow definition** with cycles, conditions, and checkpoints
+- We use **linear orchestrator patterns** — sufficient for current task routing needs
+
+### CrewAI
+**Reference patterns:** Crews + Flows, role-based collaboration, event-driven workflows, state management between tasks
+
+**What we adopted:**
+- **Role-based agent definitions** (trading agent, news agent, macro agent)
+- **Task delegation** from a coordinator to workers
+- **Shared state** via artifacts/files between tasks
+
+**Why we differ:**
+- CrewAI provides **higher-level abstractions** (Flows, Crews) with built-in collaboration patterns
+- We use **lower-level OpenClaw primitives** (sessions_spawn, sessions_send) — more control, less magic
+
+### Our Honest Assessment
+
+| Framework | Strengths | Why Not Used (for now) |
+|-----------|-----------|------------------------|
+| AutoGen Core | Mature message routing, broadcast | Adds complexity we don't need at 3-4 agent scale |
+| LangGraph | Durable workflows, graph structure | Overkill for linear task dispatch; we'd need OpenClaw integration layer |
+| CrewAI | High-level collaboration patterns | Abstractions hide OpenClaw behavior we need to work around |
+
+**We respect these frameworks** and may evolve toward their patterns as needs grow.
+
+---
+
+## When to Evolve Beyond This Design
+
+This lightweight approach works well for **small teams, few agents, and explicit orchestration**. Consider migrating to heavier frameworks when:
+
+### Trigger Conditions for Evolution
+
+| Current Limit | Future Need | Candidate Pattern |
+|---------------|-------------|-------------------|
+| 3-4 agents, point-to-point | 10+ agents, dynamic discovery | Topic/subscription (AutoGen-style) |
+| Single orchestrator | Multiple coordinators needing sync | Broadcast bus or event broker |
+| Explicit spawn/send | Automatic workflow resumption | Durable workflow engine (LangGraph-style) |
+| File-based artifacts | Rich shared state with transactions | Comprehensive memory layer |
+| Linear task chains | Complex branching/joining | Graph-based orchestration |
+| Zoe reviews everything | Full autonomy required | Reduced human-in-the-loop |
+
+### Migration Path
+
+If you hit these limits:
+
+1. **Evaluate AutoGen Core** for message routing and broadcast needs
+2. **Evaluate LangGraph** for durable, complex workflows
+3. **Consider a hybrid**: Keep this framework for OpenClaw-specific workarounds, add framework for orchestration
+
+### Our Commitment
+
+This framework will remain **honest about its scope**:
+- Not a replacement for full agent runtimes
+- Not a broadcast bus or message broker
+- Not a workflow engine with cycles and conditions
+
+**It is**: A pragmatic layer that makes OpenClaw's multi-agent capabilities reliable at small scale.
+
+---
 
 ### spawn-interceptor Plugin (v2.4)
 
