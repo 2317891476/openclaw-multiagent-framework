@@ -1,26 +1,30 @@
 # spawn-interceptor
 
-> Zero-config OpenClaw plugin for ACP task lifecycle management. Tracks spawns, relays progress, detects completion, and notifies Discord — without any agent-side code changes.
+> Zero-config OpenClaw plugin for ACP task lifecycle management. Tracks spawns, relays progress, detects completion (including failures), notifies Discord, and actively wakes parent agents — without any agent-side code changes.
 
 ## The Problem
 
-OpenClaw's ACP (Agent Cloud Platform) has three fundamental gaps:
+OpenClaw's ACP has five fundamental gaps (each discovered in production):
 
-1. **No completion signal** — `sessions_spawn(runtime="acp")` returns immediately. When the child finishes, nothing happens. No callback, no event, no webhook.
+1. **No completion signal** — `sessions_spawn(runtime="acp")` returns immediately. When the child finishes, nothing happens. No callback, no event, no webhook. ([#40272](https://github.com/openclaw/openclaw/issues/40272))
 2. **Broken event relay** — `parentStreamRelay` has a cross-process bug ([#45205](https://github.com/openclaw/openclaw/issues/45205)): ACP runs in a gateway subprocess, so `onAgentEvent` never crosses the process boundary. Only synthetic `start`/`stall` notices reach the parent.
-3. **Zombie accumulation** — Dead sessions stay `closed: false` in `~/.acpx/sessions/index.json`, consuming `maxConcurrentSessions` slots until manual restart.
+3. **Zombie accumulation** — Dead sessions stay `closed: false` in `~/.acpx/sessions/index.json`, consuming `maxConcurrentSessions` slots. ([PR #46949](https://github.com/openclaw/openclaw/pull/46949))
+4. **Batch spawn failure** — Concurrent ACP spawns trigger `ACP_SESSION_INIT_FAILED` due to metadata race conditions. Failed sessions get GC'd and misidentified as "completed". (v3.6 fix)
+5. **Passive hook model** — `before_prompt_build` only fires when someone sends a message to the agent. Completed tasks queue up indefinitely if no one triggers a new turn. (v3.6 fix)
 
-Result: agents dispatch tasks into a black hole with zero visibility.
+Result: agents dispatch tasks into a black hole with zero visibility, false completion reports, and no automatic continuation.
 
 ## Architecture
 
 ```
-┌─────────────────── spawn-interceptor v3.5.0 ───────────────────┐
+┌─────────────────── spawn-interceptor v3.6.0 ───────────────────┐
 │                                                                 │
 │  HOOKS (system-level interception)                              │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │ before_tool_call   → inject streamTo + taskId + relay    │   │
+│  │                      + immediate start notification      │   │
 │  │ after_tool_call    → link ACP session + streamLogPath    │   │
+│  │                      + detect spawn failures (v3.6)      │   │
 │  │ subagent_spawning  → enrich with Discord context         │   │
 │  │ subagent_spawned   → precise session key binding         │   │
 │  │ subagent_ended     → L1 completion detection             │   │
@@ -32,28 +36,30 @@ Result: agents dispatch tasks into a black hole with zero visibility.
 │  │ Progress relay (15s tick, adaptive rate)                  │   │
 │  │   <2min: every tick │ 2-10min: 60s │ >10min: 5min        │   │
 │  │                                                          │   │
-│  │ ACP session poller (15s) → L2 completion detection       │   │
+│  │ ACP session poller (15s) → L2 completion/failure detect  │   │
+│  │   + failure heuristics: never-used / too-short (v3.6)    │   │
 │  │ Stale reaper (5min) → L3 timeout fallback                │   │
 │  │ ACPX zombie cleanup → close dead sessions                │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                 │
 │  PROGRESS READING (dual-mode)                                   │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │ Incremental (relay):                                     │   │
-│  │   L1: acp-stream.jsonl → filter noise → assistant_delta  │   │
-│  │   L2: child .jsonl transcript → offset-tracked fallback  │   │
-│  │   Heartbeat: stall detected → emit status message        │   │
-│  │                                                          │   │
-│  │ Full (completion):                                       │   │
-│  │   Read entire transcript → no offset → idempotent        │   │
+│  │ Incremental (relay): offset-tracked, noise-filtered      │   │
+│  │ Full (completion): read from byte 0, idempotent          │   │
+│  │ Heartbeat: stall detected → emit liveness signal         │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                 │
-│  OUTPUT                                                         │
+│  POST-COMPLETION (v3.6)                                         │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │ subagent.run(parentSessionKey) → trigger parent turn     │   │
+│  │ prompt injection → parent gets completion report         │   │
+│  │ Discord notification → user sees result                  │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  PERSISTENCE                                                    │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │ task-log.jsonl      → single source of truth             │   │
 │  │ .pending-tasks.json → survives gateway restart           │   │
-│  │ Discord messages    → start / progress / completion      │   │
-│  │ Prompt injection    → inform parent agent                │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -62,38 +68,50 @@ Result: agents dispatch tasks into a black hole with zero visibility.
 
 ### Why plugin hooks instead of wrapper functions?
 
-Agents have "muscle memory" from training. They call `sessions_spawn` directly — a native OpenClaw tool trained millions of times. Wrapper functions like `spawn_with_tracking()` get skipped. Even `MUST`/`P0`/`NON-NEGOTIABLE` prompt directives fail. System-level `before_tool_call` hooks are invisible to the agent — **impossible to bypass**.
+Agents have "muscle memory" from training. They call `sessions_spawn` directly. Wrapper functions get skipped. Even `MUST`/`P0` prompt directives fail with <100% compliance. System-level `before_tool_call` hooks are **invisible to the agent — impossible to bypass**.
 
-### Why two read modes?
+### Why two read modes (incremental vs full)?
 
-v3.3 used one `readProgress` for both relay and completion. Relay consumed the file offset, then completion found nothing left to read — empty completion reports. v3.4+ splits into:
+v3.3 used one `readProgress` for both relay and completion. Relay consumed the file offset → completion found nothing left → **empty completion reports** for a week.
 
-- **`readProgressIncremental`**: offset-tracked, avoids re-sending. Filters noise ("Started ...", "no output for 60s"). Used by periodic relay.
-- **`readProgressFull`**: reads entire transcript from byte 0. Idempotent. Used by all completion paths.
+- **Incremental**: offset-tracked, filters noise, for periodic relay
+- **Full**: reads entire file, idempotent, for all completion paths
+
+### Why failure detection in the poller (v3.6)?
+
+Prior to v3.6, `session closed` always meant "assumed complete". But `closed` has three causes:
+
+| Cause | `last_used_at` | Output | Correct status |
+|-------|----------------|--------|---------------|
+| Normal completion | > created_at | Has content | `assumed_complete` |
+| Init failure + GC | = created_at | Empty | **`failed`** |
+| Crash + GC | > created_at | Partial | `assumed_complete` |
+
+v3.6 checks `last_used_at == created_at` (never used) and `age < 2min + no output` (closed too quickly) to distinguish failures from completions.
+
+### Why active parent wake (v3.6)?
+
+`before_prompt_build` is passive — it only runs when the agent starts a new turn. If no one sends a message, completion reports queue forever. `pluginRuntime.subagent.run()` actively delivers a message to the parent session, triggering a new turn and prompt injection.
 
 ### Why adaptive relay frequency?
 
-Fixed 15s relay floods Discord during 30-minute tasks (120+ messages). Adaptive rate:
+Fixed 15s relay floods Discord during 30-minute tasks (120+ messages).
 
-| Task age | Relay interval | Rationale |
-|----------|---------------|-----------|
-| < 2 min  | Every 15s tick | Maximum visibility for short tasks |
-| 2–10 min | Every 60s | Reduce noise, still responsive |
-| > 10 min | Every 5 min | Summary-level updates only |
-
-### Why heartbeat messages?
-
-Due to #45205, `acp-stream.jsonl` only contains `system_event` entries (start, stall). No `assistant_delta`. The transcript `.jsonl` only writes assistant messages at turn completion — not during tool execution. For single-turn tasks, there's zero intermediate output. When stream shows "no output for 60s" but transcript has nothing, we emit a heartbeat so users know the task is alive.
+| Task age | Interval | Rationale |
+|----------|----------|-----------|
+| < 2 min  | 15s | Maximum visibility for short tasks |
+| 2–10 min | 60s | Reduce noise |
+| > 10 min | 5 min | Summary-level only |
 
 ## Version History
 
 | Version | Key Changes |
 |---------|-------------|
-| **v3.5.0** | Immediate start notification. Heartbeat on stall. |
-| **v3.4.0** | Split full/incremental read. Adaptive relay. 42 unit tests. |
-| **v3.3.0** | Full transcript in completion reports. Remove message truncation. |
+| **v3.6.0** | **Failure detection**: distinguish init failure from completion. **Active parent wake** via `subagent.run()`. **Spawn error detection** in `after_tool_call`. |
+| **v3.5.0** | Immediate start notification. Heartbeat on stall. Adaptive relay. |
+| **v3.4.0** | Split full/incremental read. 42 unit tests. |
+| **v3.3.0** | Full transcript in completion reports. |
 | **v3.2.0** | Transcript fallback for #45205. |
-| **v3.1.0** | Restore progress polling via acp-stream.jsonl. |
 | **v3.0.0** | Simplify to `streamTo: "parent"` injection. |
 
 ## Testing
@@ -102,34 +120,23 @@ Due to #45205, `acp-stream.jsonl` only contains `system_event` entries (start, s
 node test.js  # 42 tests, ~500ms
 ```
 
-Covers: `readProgressFromStreamLog`, `readProgressFromTranscript`, `readProgressFull`, `readProgressIncremental`, `extractChildSessionKey`, `extractStreamLogPath`, `parseDiscordChannelFromSessionKey`, `resolveTranscriptPath`, `genId`, plus 5 end-to-end scenarios.
-
 ## Installation
 
 ```bash
 cp -r plugins/spawn-interceptor ~/.openclaw/plugins/
 ```
 
-```json
-{
-  "plugins": {
-    "allow": ["spawn-interceptor"],
-    "entries": { "spawn-interceptor": { "enabled": true } }
-  }
-}
-```
-
 ## Known Limitations
 
-- **Single-turn ACP tasks**: No intermediate progress (transcript writes only at turn completion). Heartbeat messages provide liveness signal.
-- **Same-host only**: File system polling requires all processes on one machine.
-- **acpx dependency**: If `kill -9` bypasses acpx cleanup, poller can't detect completion.
-- **No auto-retry**: Detects and reports failure, doesn't retry. Retry is orchestrator's responsibility.
+- **Single-turn tasks**: No intermediate progress (transcript writes at turn completion only). Heartbeats provide liveness.
+- **Same-host only**: File system polling requires co-located processes.
+- **Concurrent spawn instability**: 4 concurrent ACP spawns had 50% init failure rate. v3.6 detects but can't prevent.
+- **No auto-retry**: Detects and reports, doesn't retry. Retry is orchestrator's responsibility.
 
-## Related
+## Related Issues & PRs
 
-- [COMMUNICATION_ISSUES.md](../../COMMUNICATION_ISSUES.md) — Problem analysis
-- OpenClaw [#45205](https://github.com/openclaw/openclaw/issues/45205) — Cross-process event bug
-- OpenClaw [#40272](https://github.com/openclaw/openclaw/issues/40272) — notifyChannel ignored
-- OpenClaw [PR #46308](https://github.com/openclaw/openclaw/pull/46308) — ACP lifecycle registration
-- OpenClaw [PR #46949](https://github.com/openclaw/openclaw/pull/46949) — Back-pressure eviction
+- [#45205](https://github.com/openclaw/openclaw/issues/45205) — Cross-process event relay broken
+- [#40272](https://github.com/openclaw/openclaw/issues/40272) — `notifyChannel` silently ignored
+- [PR #46308](https://github.com/openclaw/openclaw/pull/46308) — Register ACP in subagent lifecycle
+- [PR #46949](https://github.com/openclaw/openclaw/pull/46949) — Back-pressure eviction for zombies
+- [PR #46952](https://github.com/openclaw/openclaw/pull/46952) — Fix fetch proxy for bot identity

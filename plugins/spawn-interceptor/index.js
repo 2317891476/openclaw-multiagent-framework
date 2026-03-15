@@ -397,6 +397,23 @@ async function onTaskCompleted(task, status, summary) {
     completedAt: new Date().toISOString(),
   });
   pluginLogger?.info(`spawn-interceptor: queued completion ${task.taskId} (status=${status}) for prompt injection`);
+
+  // Actively notify parent session so it starts a new turn and picks up prompt injection
+  const parentSessionKey = task.requesterSessionKey;
+  if (parentSessionKey && pluginRuntime?.subagent?.run) {
+    const emoji = status === "completed" || status === "assumed_complete" ? "✅" : "⏰";
+    const shortSummary = (summary || "").slice(0, 500);
+    const msg = `${emoji} ACP task ${task.taskId} finished (${status}). ${shortSummary ? "Summary: " + shortSummary : "Check task-log for details."}`;
+    pluginRuntime.subagent.run({
+      sessionKey: parentSessionKey,
+      message: msg,
+      deliver: true,
+    }).then((r) => {
+      pluginLogger?.info(`spawn-interceptor: notified parent session ${parentSessionKey} (runId=${r?.runId})`);
+    }).catch((err) => {
+      pluginLogger?.warn(`spawn-interceptor: failed to notify parent session ${parentSessionKey}: ${err?.message}`);
+    });
+  }
 }
 
 // --- Stale reaper ---
@@ -534,18 +551,32 @@ function pollAcpSessions() {
         const progress = readProgressFull(task, taskId);
         const summary = progress?.text || "";
 
+        // Distinguish genuine completion from init failure / GC cleanup
+        const age = Date.now() - new Date(task.spawnedAt).getTime();
+        const lastUsed = detail.last_used_at || detail.lastUsedAt;
+        const created = detail.created_at || detail.createdAt;
+        const wasNeverUsed = lastUsed && created && lastUsed === created;
+        const tooShort = age < 120_000; // closed within 2 minutes — suspicious
+        const hasNoOutput = !summary || summary.length < 20;
+        const isSuspectedFailure = (wasNeverUsed || tooShort) && hasNoOutput;
+        const finalStatus = isSuspectedFailure ? "failed" : "assumed_complete";
+
         pendingTasks.delete(taskId);
         savePending();
 
         appendLog({
           taskId, agentId: task.agentId, sessionKey: task.sessionKey,
           runtime: task.runtime, task: task.task, spawnedAt: task.spawnedAt,
-          status: "assumed_complete", completedAt: new Date().toISOString(),
+          status: finalStatus, completedAt: new Date().toISOString(),
           completionSource: "acp_poller",
           acpSessionKey,
+          ...(isSuspectedFailure ? { failureReason: wasNeverUsed ? "session_never_used" : "closed_too_quickly" } : {}),
         });
-        onTaskCompleted(task, "assumed_complete", summary).catch(() => {});
-        pluginLogger?.info(`spawn-interceptor: ${taskId} → assumed_complete (acp_poller, session closed, pending=${pendingTasks.size})`);
+        onTaskCompleted(task, finalStatus, isSuspectedFailure
+          ? `⚠️ Task likely failed: session ${wasNeverUsed ? "was never used (ACP init failure?)" : "closed within " + Math.round(age / 1000) + "s"}. No meaningful output found.`
+          : summary
+        ).catch(() => {});
+        pluginLogger?.info(`spawn-interceptor: ${taskId} → ${finalStatus} (acp_poller, session closed, pending=${pendingTasks.size})${isSuspectedFailure ? " [SUSPECTED FAILURE: " + (wasNeverUsed ? "never_used" : "too_short") + "]" : ""}`);
         break;
       }
     }
@@ -556,7 +587,7 @@ function pollAcpSessions() {
 
 const spawnInterceptorPlugin = {
   name: "spawn-interceptor",
-  version: "3.5.0",
+  version: "3.6.0",
 
   register(api) {
     pluginLogger = api.logger;
@@ -624,7 +655,11 @@ const spawnInterceptorPlugin = {
         pluginRuntime.channel.discord.sendMessageDiscord(target, `🚀 **ACP 任务开始** (${id.slice(-8)})\n> ${taskDesc}`, {
           cfg: pluginConfig,
           accountId: taskEntry.discordAccountId || undefined,
-        }).catch(() => {});
+        }).then(() => {
+          api.logger.info(`spawn-interceptor: start notify sent for ${id} to ${target}`);
+        }).catch((err) => {
+          api.logger.warn(`spawn-interceptor: start notify failed for ${id}: ${err?.message}`);
+        });
       }
 
       if (rt === "acp" && p.task) {
@@ -700,6 +735,32 @@ const spawnInterceptorPlugin = {
     // Hook 2.6: after_tool_call — extract ACP session key from sessions_spawn result (PRIMARY for ACP)
     api.on("after_tool_call", (event, ctx) => {
       if (event.toolName !== "sessions_spawn") return;
+
+      // Detect spawn failures early
+      if (event.error) {
+        const taskParam = String(event.params?.task || "");
+        const taskIdMatch = taskParam.match(/taskId":"(tsk_\w+)"/);
+        if (taskIdMatch) {
+          const taskId = taskIdMatch[1];
+          const task = pendingTasks.get(taskId);
+          if (task) {
+            api.logger.warn(`spawn-interceptor: ${taskId} spawn FAILED: ${event.error}`);
+            pendingTasks.delete(taskId);
+            savePending();
+            appendLog({
+              taskId, agentId: task.agentId, sessionKey: task.sessionKey,
+              runtime: task.runtime, task: task.task, spawnedAt: task.spawnedAt,
+              status: "failed", completedAt: new Date().toISOString(),
+              completionSource: "after_tool_call_error",
+              error: String(event.error).slice(0, 500),
+            });
+            onTaskCompleted(task, "failed", `❌ ACP spawn failed: ${String(event.error).slice(0, 300)}`).catch(() => {});
+            return;
+          }
+        }
+        api.logger.warn(`spawn-interceptor: sessions_spawn error (no matching task): ${event.error}`);
+        return;
+      }
 
       const result = event.result;
       const childSessionKey = extractChildSessionKey(result);
