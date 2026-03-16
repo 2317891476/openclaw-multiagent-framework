@@ -558,6 +558,15 @@ function pollAcpSessions() {
         : new Date(session.lastUsedAt).getTime();
       const timeDiff = sessionCreatedAt - spawnTs;
 
+      // Guard: reject sessions that were closed BEFORE the task was spawned.
+      // After a Gateway restart, old closed sessions can time-match new tasks
+      // because acpx reuses session names; checking closed_at prevents false positives.
+      const closedAtRaw = sessionDetail?.closed_at || session.lastUsedAt;
+      if (closedAtRaw) {
+        const closedAtTs = new Date(closedAtRaw).getTime();
+        if (closedAtTs < spawnTs) continue;
+      }
+
       if (timeDiff >= -2000 && timeDiff < TIME_MATCH_WINDOW_MS) {
         const closedAt = sessionDetail?.closed_at || session.lastUsedAt || new Date().toISOString();
         const sessionName = sessionDetail?.name || session.name || "?";
