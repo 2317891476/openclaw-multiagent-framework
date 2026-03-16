@@ -13,6 +13,7 @@
  *
  * v3.8.0 changes:
  *   - EXEC GUARD: before_tool_call hook blocks main session from exec-ing runner/claude
+ *   - TIMEOUT GUARD: auto-inject 30s timeout for find/du/rsync/wget in main session
  *
  * v3.7.0 changes:
  *   - sendWithRetry: exponential backoff retry for all Discord API calls
@@ -937,6 +938,44 @@ const spawnInterceptorPlugin = {
           "The subagent will exec the runner internally. subagent_ended fires on completion.",
         ].join("\n"),
       };
+    });
+
+    // Hook 0.6: before_tool_call — TIMEOUT GUARD: auto-inject timeout for potentially slow commands in main session
+    api.on("before_tool_call", (event, ctx) => {
+      if (event.toolName !== "exec") return;
+
+      const sessionKey = ctx.sessionKey || "";
+      if (!sessionKey.startsWith("agent:main:")) return;
+
+      const command = (event.params?.command || "").trim();
+
+      // Commands that can run indefinitely without user realizing
+      const slowCommandPatterns = [
+        /^find\s/,           // find without timeout
+        /^find$/,            // bare find
+        /find\s+\//,       // find with absolute path
+        /^du\s+-.*[^0-9]\//, // du on root-level paths
+        /^tar\s.*czf/,       // tar creating large archives
+        /^rsync\s/,          // rsync large transfers
+        /^wget\s/,           // wget large downloads
+        /^curl.*-o\s/,       // curl downloading files
+      ];
+
+      const needsTimeout = slowCommandPatterns.some(p => p.test(command));
+      if (!needsTimeout) return;
+
+      // Skip if already has timeout prefix
+      if (/^timeout\s/.test(command)) return;
+      // Skip if piped or chained (complex commands, user likely knows what they're doing)
+      if (/[|;&]/.test(command) && !/^find\s/.test(command)) return;
+
+      const TIMEOUT_SECS = 30;
+      // macOS has no `timeout` command; use perl one-liner as cross-platform wrapper
+      const escaped = command.replace(/'/g, "'\\''");
+      const newCommand = `perl -e 'alarm ${TIMEOUT_SECS}; exec @ARGV or die "exec: $!"' -- sh -c '${escaped}'`;
+      api.logger.info(`spawn-interceptor: TIMEOUT GUARD injected ${TIMEOUT_SECS}s timeout for slow command in main session: ${command.slice(0, 80)}`);
+
+      return { params: { ...event.params, command: newCommand } };
     });
 
     // Hook 1: before_tool_call — inject relay + parse Discord origin from sessionKey
