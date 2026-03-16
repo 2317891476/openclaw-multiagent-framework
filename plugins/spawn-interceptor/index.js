@@ -34,6 +34,7 @@ const REAPER_INTERVAL_MS = 5 * 60 * 1000;
 const ACP_POLL_INTERVAL_MS = 15 * 1000;
 const PROGRESS_RELAY_INTERVAL_MS = 15 * 1000;
 const PROGRESS_MAX_CHARS = 300;
+const SUSPECTED_FAILURE_GRACE_MS = 45 * 1000;
 
 let pendingTasks = new Map();
 let reaperTimer = null;
@@ -44,7 +45,7 @@ let pluginRuntime = null;
 let pluginConfig = null;
 let consumedAcpSessionIds = new Set();
 let lastProgressRelayOffset = {};
-let completedTasksSinceLastPrompt = [];
+let completedTasksSinceLastPrompt = new Map();
 
 // --- Persistence ---
 
@@ -183,16 +184,78 @@ async function notifyDiscord(task, status, summary) {
   }
 }
 
+export function getCompletionQueueKey(sessionKey, fallback = DEFAULT_COMPLETION_SESSION) {
+  return typeof sessionKey === "string" && sessionKey.trim() ? sessionKey.trim() : fallback;
+}
+
+export function enqueueCompletedTask(queueMap, task, status, completedAt = new Date().toISOString()) {
+  const queueKey = getCompletionQueueKey(task?.requesterSessionKey);
+  const bucket = queueMap.get(queueKey) || [];
+  bucket.push({
+    taskId: task?.taskId,
+    status,
+    task: (task?.task || "").slice(0, 100),
+    completedAt,
+  });
+  queueMap.set(queueKey, bucket);
+  return queueKey;
+}
+
+export function consumeCompletedTasksForSession(queueMap, sessionKey) {
+  const queueKey = getCompletionQueueKey(sessionKey);
+  const tasks = queueMap.get(queueKey) || [];
+  if (tasks.length > 0) {
+    queueMap.delete(queueKey);
+  }
+  return tasks;
+}
+
+export function buildCompletionInjection(tasks) {
+  if (!Array.isArray(tasks) || tasks.length === 0) return null;
+
+  const lines = tasks.map(t => {
+    const s = t.status === "completed" ? "✅" : t.status === "timeout" ? "⏰" : "❌";
+    return `${s} [${t.taskId}] ${t.task}`;
+  });
+
+  return `\n\n[SYSTEM — ACP Task Completion Report]\nThe following ACP tasks have completed since your last turn:\n${lines.join("\n")}\n\nIf you have follow-up tasks to dispatch, please continue. Otherwise, report the results to the user.\n[END REPORT]`;
+}
+
+export function classifyClosedAcpSession({
+  spawnTs,
+  now = Date.now(),
+  lastUsed,
+  created,
+  progress,
+  minFailureAgeMs = SUSPECTED_FAILURE_GRACE_MS,
+}) {
+  const taskAge = Math.max(0, now - spawnTs);
+  const wasNeverUsed = Boolean(lastUsed && created && lastUsed === created);
+  const tooShort = taskAge < 120_000;
+  const hasNoOutput = !progress || progress.length < 20;
+  const isSuspectedFailure = (wasNeverUsed || tooShort) && hasNoOutput;
+  const shouldDeferFailure = isSuspectedFailure && taskAge < minFailureAgeMs;
+  const failureReason = isSuspectedFailure
+    ? `suspected failure: wasNeverUsed=${wasNeverUsed}, tooShort=${tooShort}, hasNoOutput=${hasNoOutput}`
+    : null;
+
+  return {
+    taskAge,
+    wasNeverUsed,
+    tooShort,
+    hasNoOutput,
+    isSuspectedFailure,
+    shouldDeferFailure,
+    failureReason,
+    finalStatus: isSuspectedFailure ? "failed" : "completed",
+  };
+}
+
 async function onTaskCompleted(task, status, summary) {
   await notifyDiscord(task, status, summary || "").catch(() => {});
 
-  completedTasksSinceLastPrompt.push({
-    taskId: task.taskId,
-    status,
-    task: (task.task || "").slice(0, 100),
-    completedAt: new Date().toISOString(),
-  });
-  pluginLogger?.info(`spawn-interceptor: queued completion ${task.taskId} (status=${status}) for prompt injection`);
+  const queueKey = enqueueCompletedTask(completedTasksSinceLastPrompt, task, status);
+  pluginLogger?.info(`spawn-interceptor: queued completion ${task.taskId} (status=${status}) for prompt injection, session=${queueKey}`);
 
   // Actively trigger parent agent's new turn to pick up prompt injection
   const parentSessionKey = task.requesterSessionKey;
@@ -246,6 +309,31 @@ async function wakeParentSession(task, status, summary) {
 
 // --- Progress relay ---
 
+export function findStreamFileForSessionEntries(entries, acpSessionKey, sessionsDir = ACPX_SESSIONS_DIR, logger = pluginLogger) {
+  const openEntries = entries.filter(entry => !entry.closed);
+  const closedEntries = entries.filter(entry => entry.closed);
+
+  for (const [groupLabel, group] of [["open", openEntries], ["closed", closedEntries]]) {
+    for (const entry of group) {
+      const fp = path.join(sessionsDir, entry.file || "");
+      try {
+        const detail = JSON.parse(fs.readFileSync(fp, "utf-8"));
+        if (detail.name === acpSessionKey) {
+          const streamFile = path.join(sessionsDir, entry.acpxRecordId + ".stream.ndjson");
+          const exists = fs.existsSync(streamFile);
+          logger?.info(`spawn-interceptor: findStreamFile MATCH name=${acpSessionKey}, rid=${entry.acpxRecordId}, state=${groupLabel}, stream=${exists}`);
+          return exists ? streamFile : null;
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  logger?.info(`spawn-interceptor: findStreamFile no match for ${acpSessionKey} in ${openEntries.length} open / ${closedEntries.length} closed entries`);
+  return null;
+}
+
 function findStreamFile(acpSessionKey) {
   try {
     if (!fs.existsSync(ACPX_INDEX)) {
@@ -254,22 +342,7 @@ function findStreamFile(acpSessionKey) {
     }
     const index = JSON.parse(fs.readFileSync(ACPX_INDEX, "utf-8"));
     const entries = index.entries || [];
-    let openCount = 0;
-    for (const entry of entries) {
-      if (entry.closed) continue;
-      openCount++;
-      const fp = path.join(ACPX_SESSIONS_DIR, entry.file || "");
-      try {
-        const detail = JSON.parse(fs.readFileSync(fp, "utf-8"));
-        if (detail.name === acpSessionKey) {
-          const streamFile = path.join(ACPX_SESSIONS_DIR, entry.acpxRecordId + ".stream.ndjson");
-          const exists = fs.existsSync(streamFile);
-          pluginLogger?.info(`spawn-interceptor: findStreamFile MATCH name=${acpSessionKey}, rid=${entry.acpxRecordId}, stream=${exists}`);
-          return exists ? streamFile : null;
-        }
-      } catch { continue; }
-    }
-    pluginLogger?.info(`spawn-interceptor: findStreamFile no match for ${acpSessionKey} in ${openCount} open entries`);
+    return findStreamFileForSessionEntries(entries, acpSessionKey, ACPX_SESSIONS_DIR, pluginLogger);
   } catch (err) {
     pluginLogger?.warn(`spawn-interceptor: findStreamFile error: ${err?.message}`);
   }
@@ -572,18 +645,21 @@ function pollAcpSessions() {
         const sessionName = sessionDetail?.name || session.name || "?";
 
         // Smart completion vs failure detection
-        const taskAge = Date.now() - spawnTs;
         const lastUsed = sessionDetail?.last_used_at || sessionDetail?.lastUsedAt;
         const created = sessionDetail?.created_at || sessionDetail?.createdAt;
-        const wasNeverUsed = lastUsed && created && lastUsed === created;
-        const tooShort = taskAge < 120_000;
         const progress = readLatestProgress(task.acpSessionKey || sessionName, task.streamLogPath);
-        const hasNoOutput = !progress || progress.length < 20;
-        const isSuspectedFailure = (wasNeverUsed || tooShort) && hasNoOutput;
-        const finalStatus = isSuspectedFailure ? "failed" : "completed";
-        const failureReason = isSuspectedFailure
-          ? `suspected failure: wasNeverUsed=${wasNeverUsed}, tooShort=${tooShort}, hasNoOutput=${hasNoOutput}`
-          : null;
+        const classification = classifyClosedAcpSession({
+          spawnTs,
+          now: Date.now(),
+          lastUsed,
+          created,
+          progress,
+        });
+
+        if (classification.shouldDeferFailure) {
+          pluginLogger?.info(`spawn-interceptor: ACP task ${taskId} deferring suspected failure (age=${Math.round(classification.taskAge / 1000)}s, session=${session.acpxRecordId})`);
+          continue;
+        }
 
         pendingTasks.delete(taskId);
         consumedAcpSessionIds.add(session.acpxRecordId);
@@ -595,21 +671,21 @@ function pollAcpSessions() {
           runtime: task.runtime,
           task: task.task,
           spawnedAt: task.spawnedAt,
-          status: finalStatus,
+          status: classification.finalStatus,
           completedAt: closedAt,
           completionSource: "acp_session_poller",
           acpxSession: session.acpxRecordId,
           acpxSessionName: sessionName,
-          reason: failureReason || `acpx session closed (time match: ${Math.round(timeDiff / 1000)}s)`,
+          reason: classification.failureReason || `acpx session closed (time match: ${Math.round(timeDiff / 1000)}s)`,
         });
-        const summary = isSuspectedFailure
-          ? `❌ 任务可能未正常执行 (${failureReason})`
+        const summary = classification.isSuspectedFailure
+          ? `❌ 任务可能未正常执行 (${classification.failureReason})`
           : (progress || sessionName);
-        onTaskCompleted(task, finalStatus, summary).catch(() => {});
+        onTaskCompleted(task, classification.finalStatus, summary).catch(() => {});
 
         matched = true;
         completed++;
-        pluginLogger?.info(`spawn-interceptor: ACP task ${taskId} → ${finalStatus} (acpx session ${session.acpxRecordId} closed, match=${Math.round(timeDiff / 1000)}s${isSuspectedFailure ? ", SUSPECTED FAILURE" : ""})`);
+        pluginLogger?.info(`spawn-interceptor: ACP task ${taskId} → ${classification.finalStatus} (acpx session ${session.acpxRecordId} closed, match=${Math.round(timeDiff / 1000)}s${classification.isSuspectedFailure ? ", SUSPECTED FAILURE" : ""})`);
         break;
       }
     }
@@ -706,19 +782,15 @@ const spawnInterceptorPlugin = {
     acpPollerTimer = setInterval(pollAcpSessions, ACP_POLL_INTERVAL_MS);
     progressRelayTimer = setInterval(() => relayProgress().catch(() => {}), PROGRESS_RELAY_INTERVAL_MS);
 
-    // Hook 0: before_prompt_build — inject completed ACP task info into next agent turn
+    // Hook 0: before_prompt_build — inject completed ACP task info into the matching parent session only
     api.on("before_prompt_build", (event, ctx) => {
-      if (completedTasksSinceLastPrompt.length === 0) return;
+      const tasks = consumeCompletedTasksForSession(completedTasksSinceLastPrompt, ctx.sessionKey);
+      if (tasks.length === 0) return;
 
-      const tasks = completedTasksSinceLastPrompt.splice(0);
-      const lines = tasks.map(t => {
-        const s = t.status === "completed" ? "✅" : t.status === "timeout" ? "⏰" : "❌";
-        return `${s} [${t.taskId}] ${t.task}`;
-      });
+      const injection = buildCompletionInjection(tasks);
+      if (!injection) return;
 
-      const injection = `\n\n[SYSTEM — ACP Task Completion Report]\nThe following ACP tasks have completed since your last turn:\n${lines.join("\n")}\n\nIf you have follow-up tasks to dispatch, please continue. Otherwise, report the results to the user.\n[END REPORT]`;
-
-      api.logger.info(`spawn-interceptor: injected ${tasks.length} completed task(s) into prompt`);
+      api.logger.info(`spawn-interceptor: injected ${tasks.length} completed task(s) into prompt for ${getCompletionQueueKey(ctx.sessionKey)}`);
       return { prependContext: injection };
     });
 
@@ -986,6 +1058,7 @@ const spawnInterceptorPlugin = {
     if (progressRelayTimer) { clearInterval(progressRelayTimer); progressRelayTimer = null; }
     consumedAcpSessionIds.clear();
     lastProgressRelayOffset = {};
+    completedTasksSinceLastPrompt = new Map();
     pluginLogger = null;
     pluginRuntime = null;
     pluginConfig = null;

@@ -9,6 +9,14 @@ import assert from "assert";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import {
+  buildCompletionInjection,
+  classifyClosedAcpSession,
+  consumeCompletedTasksForSession,
+  enqueueCompletedTask,
+  findStreamFileForSessionEntries,
+  getCompletionQueueKey,
+} from "./index.js";
 
 const TEMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-interceptor-test-"));
 const cleanup = () => fs.rmSync(TEMP_DIR, { recursive: true, force: true });
@@ -815,6 +823,111 @@ test("E2E: readProgressFull is idempotent (can be called multiple times)", () =>
   const r1 = readProgressFull(task, "e2e5");
   const r2 = readProgressFull(task, "e2e5");
   assert.deepStrictEqual(r1, r2, "readProgressFull should be idempotent");
+});
+
+// === completion queue scoping ===
+
+console.log("── completion queue scoping ──");
+
+test("getCompletionQueueKey preserves requester session key", () => {
+  assert.strictEqual(
+    getCompletionQueueKey("agent:main:discord:channel:1481980753825759343"),
+    "agent:main:discord:channel:1481980753825759343",
+  );
+});
+
+test("getCompletionQueueKey falls back for empty session key", () => {
+  assert.strictEqual(getCompletionQueueKey(""), "agent:main:completion-relay");
+});
+
+test("completion queue is isolated per requester session", () => {
+  const queue = new Map();
+  enqueueCompletedTask(queue, {
+    taskId: "tsk_thread",
+    task: "thread task",
+    requesterSessionKey: "agent:main:discord:channel:1481980753825759343",
+  }, "failed", "2026-03-16T04:00:00.000Z");
+  enqueueCompletedTask(queue, {
+    taskId: "tsk_general",
+    task: "general task",
+    requesterSessionKey: "agent:main:discord:channel:1475430870318846048",
+  }, "completed", "2026-03-16T04:00:01.000Z");
+
+  const generalTasks = consumeCompletedTasksForSession(queue, "agent:main:discord:channel:1475430870318846048");
+  assert.strictEqual(generalTasks.length, 1);
+  assert.strictEqual(generalTasks[0].taskId, "tsk_general");
+
+  const threadTasks = consumeCompletedTasksForSession(queue, "agent:main:discord:channel:1481980753825759343");
+  assert.strictEqual(threadTasks.length, 1);
+  assert.strictEqual(threadTasks[0].taskId, "tsk_thread");
+});
+
+test("buildCompletionInjection includes completion header and task line", () => {
+  const injection = buildCompletionInjection([
+    { taskId: "tsk_001", status: "failed", task: "最小恢复验证" },
+  ]);
+  assert.ok(injection.includes("[SYSTEM — ACP Task Completion Report]"));
+  assert.ok(injection.includes("❌ [tsk_001] 最小恢复验证"));
+});
+
+// === closed session stream lookup ===
+
+console.log("── closed session stream lookup ──");
+
+test("findStreamFileForSessionEntries can read closed session stream", () => {
+  const dir = path.join(TEMP_DIR, "closed-stream");
+  fs.mkdirSync(dir, { recursive: true });
+
+  const recordId = "closed-stream-001";
+  const detailPath = path.join(dir, `${recordId}.json`);
+  const streamPath = path.join(dir, `${recordId}.stream.ndjson`);
+  fs.writeFileSync(detailPath, JSON.stringify({ name: "agent:claude:acp:closed-one" }));
+  fs.writeFileSync(streamPath, JSON.stringify({ ok: true }) + "\n");
+
+  const found = findStreamFileForSessionEntries([
+    { acpxRecordId: recordId, file: `${recordId}.json`, closed: true },
+  ], "agent:claude:acp:closed-one", dir, null);
+
+  assert.strictEqual(found, streamPath);
+});
+
+// === suspected failure grace period ===
+
+console.log("── suspected failure grace period ──");
+
+test("classifyClosedAcpSession defers young suspected failure", () => {
+  const now = Date.now();
+  const created = new Date(now - 20_000).toISOString();
+  const result = classifyClosedAcpSession({
+    spawnTs: now - 20_000,
+    now,
+    created,
+    lastUsed: created,
+    progress: "",
+    minFailureAgeMs: 45_000,
+  });
+
+  assert.strictEqual(result.isSuspectedFailure, true);
+  assert.strictEqual(result.shouldDeferFailure, true);
+  assert.strictEqual(result.finalStatus, "failed");
+});
+
+test("classifyClosedAcpSession marks short task with real output as completed", () => {
+  const now = Date.now();
+  const created = new Date(now - 20_000).toISOString();
+  const result = classifyClosedAcpSession({
+    spawnTs: now - 20_000,
+    now,
+    created,
+    lastUsed: created,
+    progress: "ACP_RECOVERED and more than twenty chars",
+    minFailureAgeMs: 45_000,
+  });
+
+  assert.strictEqual(result.hasNoOutput, false);
+  assert.strictEqual(result.isSuspectedFailure, false);
+  assert.strictEqual(result.shouldDeferFailure, false);
+  assert.strictEqual(result.finalStatus, "completed");
 });
 
 // ─── Summary ───
