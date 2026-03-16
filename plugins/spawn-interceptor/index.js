@@ -1,14 +1,18 @@
 /**
- * spawn-interceptor v3.7.0 — OpenClaw plugin for ACP task tracking + notification.
+ * spawn-interceptor v3.8.0 — OpenClaw plugin for ACP task tracking + notification.
  *
  * Based on v2.5.2 from github.com/lanyasheng/openclaw-multiagent-framework
  *
+ * Exec guard: prevents main session from exec-ing runner/claude (blocks session).
  * Completion detection (5-layer pipeline):
  *   L0. after_tool_call error — immediate spawn failure detection
  *   L1. subagent_ended hook — precise match by targetSessionKey
  *   L2. ACP session poller — smart completion vs failure heuristics
  *   L3. Stale reaper — marks tasks stuck > 30min as timeout
  *   L4. before_prompt_build — injects completion reports into parent turn
+ *
+ * v3.8.0 changes:
+ *   - EXEC GUARD: before_tool_call hook blocks main session from exec-ing runner/claude
  *
  * v3.7.0 changes:
  *   - sendWithRetry: exponential backoff retry for all Discord API calls
@@ -866,7 +870,7 @@ const spawnInterceptorPlugin = {
     pluginRuntime = api.runtime;
     pluginConfig = api.config;
 
-    api.logger.info("spawn-interceptor v3.7.0: registering (retry + L0 spawn failure + smart poller + parent wake + progress relay)");
+    api.logger.info("spawn-interceptor v3.8.0: registering (retry + L0 spawn failure + smart poller + parent wake + progress relay)");
 
     loadPending();
     if (pendingTasks.size > 0) {
@@ -893,6 +897,46 @@ const spawnInterceptorPlugin = {
 
       api.logger.info(`spawn-interceptor: injected ${tasks.length} completed task(s) into prompt for ${getCompletionQueueKey(ctx.sessionKey)}`);
       return { prependContext: injection };
+    });
+
+    // Hook 0.5: before_tool_call — EXEC GUARD: prevent main session from exec-ing runner/claude
+    api.on("before_tool_call", (event, ctx) => {
+      if (event.toolName !== "exec") return;
+
+      const sessionKey = ctx.sessionKey || "";
+      // Only guard main agent sessions (agent:main:discord:channel:XXX)
+      if (!sessionKey.startsWith("agent:main:")) return;
+
+      const command = (event.params?.command || "").toLowerCase();
+      const dangerPatterns = [
+        "subagent_claude_runner",
+        "run_subagent_claude_v1",
+        "runner.js",
+        /claude.*--print/,
+        /claude.*--permission-mode/,
+      ];
+
+      const isBlocked = dangerPatterns.some(p => {
+        if (p instanceof RegExp) return p.test(command);
+        return command.includes(p);
+      });
+
+      if (!isBlocked) return;
+
+      api.logger.warn(`spawn-interceptor: EXEC GUARD blocked long-running exec in main session: ${command.slice(0, 100)}`);
+
+      return {
+        block: true,
+        blockReason: [
+          "Executing runner/claude directly in the main session is forbidden.",
+          "This blocks the session and prevents responding to user messages.",
+          "",
+          "Use sessions_spawn(runtime=\"subagent\") instead:",
+          '  sessions_spawn({ runtime: "subagent", task: "<your task>", cwd: "<dir>" })',
+          "",
+          "The subagent will exec the runner internally. subagent_ended fires on completion.",
+        ].join("\n"),
+      };
     });
 
     // Hook 1: before_tool_call — inject relay + parse Discord origin from sessionKey
@@ -1150,7 +1194,7 @@ const spawnInterceptorPlugin = {
       }
     });
 
-    api.logger.info(`spawn-interceptor v3.7.0: all hooks registered. Poller=${ACP_POLL_INTERVAL_MS / 1000}s, Progress=${PROGRESS_RELAY_INTERVAL_MS / 1000}s, ZombieCleanup=every ${REAPER_INTERVAL_MS / 1000}s`);
+    api.logger.info(`spawn-interceptor v3.8.0: all hooks registered. Poller=${ACP_POLL_INTERVAL_MS / 1000}s, Progress=${PROGRESS_RELAY_INTERVAL_MS / 1000}s, ZombieCleanup=every ${REAPER_INTERVAL_MS / 1000}s`);
   },
 
   unregister() {
