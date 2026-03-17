@@ -1,128 +1,226 @@
 # Subagent + Claude Code CLI Runner
 
-A lightweight alternative to ACP for executing Claude Code tasks within OpenClaw. Instead of going through the ACP layer (which suffers from zombie sessions, concurrency deadlocks, and cross-process event loss), this approach uses `sessions_spawn(runtime="subagent")` combined with a Node.js runner that directly invokes the Claude Code CLI.
+A lightweight alternative to ACP for long-running coding tasks inside OpenClaw.
 
-## Architecture
+Instead of relying on ACP session lifecycle, this example uses:
 
-```
-Main Agent (OpenClaw)
-  ↓ sessions_spawn(runtime="subagent")
-  Subagent Session
-    ↓ exec: bash run_v1.sh "task prompt" "label"
-    run_v1.sh (blocking wait)
-      ↓ node runner.js --task "..."
-      Runner → spawn claude --permission-mode bypassPermissions --print "task"
-        ↓
-        Claude Code CLI (executes coding task)
-        ↓
-      Runner ← collects stdout/stderr/milestones/status
-      Runner → writes run directory (status.json / final-summary.json / final-report.md)
-    run_v1.sh ← parses runner stdout → outputs RUN_DIR / STATUS / FINAL_SUMMARY_JSON
-  Subagent Session ← exec returns
-  ↓ subagent_ended event
-  spawn-interceptor → notifies parent (CLI fallback)
-Main Agent ← receives completion notification
-```
+1. `sessions_spawn(runtime="subagent")`
+2. a blocking shell wrapper (`run_v1.sh`)
+3. a local Node.js runner (`runner.js`) that spawns Claude Code CLI directly
+4. an optional file-based watcher (`watcher.js`) for progress inspection
 
-## Why Not ACP?
+The result is a small, auditable run-directory protocol that does **not** depend on ACP completion callbacks.
 
-| Issue | ACP | This Approach |
-|-------|-----|---------------|
-| Zombie sessions | Common (session stays open after process exits) | Impossible (CLI exits = done) |
-| Concurrent deadlocks | `maxConcurrentSessions` exhaustion | No session pool needed |
-| Cross-process event loss | `onAgentEvent` only works in-process | No cross-process dependency |
-| Completion detection | Requires 5-layer polling pipeline | Native `subagent_ended` event |
-| Process cleanup | Manual `acpx` garbage collection | Dual timeout watchdog + SIGTERM→SIGKILL |
+## What is included
 
-## Components
+- `runner.js`: hardened Claude Code CLI runner with total-timeout + two-stage stall watchdog
+- `run_v1.sh`: convenience wrapper that returns stable `RUN_DIR` / `FINAL_SUMMARY_JSON`
+- `watcher.js`: optional watcher that emits `started / heartbeat / milestone / stall / stall_cleared / completed / failed`
+- `cleanup.sh`: retention-based cleanup for old run directories
+- `test_watchdog_smoke.sh`: self-contained smoke test using mock `claude` binaries
 
-### `runner.js` — Claude Code CLI Process Manager
+## What is intentionally not included
 
-Spawns `claude --permission-mode bypassPermissions --print <task>` and manages the entire lifecycle:
+- business-specific prompts or trading logic
+- machine-local paths or user-specific configuration
+- private run artifacts
+- internal hardening report raw text
 
-- **Dual timeout watchdog**: Total runtime (default: 1800s) + idle timeout (default: 600s)
-- **Graceful shutdown**: SIGTERM → grace period → SIGKILL escalation
-- **Process group kill**: Uses `detached: true` + `-pid` to clean entire process tree
-- **Milestone extraction**: Captures `MILESTONE: xxx` / `[milestone] xxx` from stdout
-- **Heartbeat**: Periodic status.json updates for external monitoring
-- **Auto-detection**: Finds Claude Code CLI in PATH, npm global, or custom locations
-- **Structured output**: `final-summary.json` (machine-readable) + `final-report.md` (human-readable)
+## Why use this pattern
 
-### `run_v1.sh` — Orchestration Wrapper
+| Concern | ACP-heavy path | This example |
+|---|---|---|
+| Completion truth | Depends on ACP lifecycle and follow-up plumbing | Process exit + terminal summary file |
+| Zombie session risk | Possible | Not applicable |
+| Long silent file-writing task | Easy to misclassify as idle | `workdir` activity keeps it alive |
+| Timeout semantics | Often ambiguous | Explicit `total` vs `stall` timeout |
+| Cleanup | Extra session hygiene needed | Local process-tree kill + run cleanup |
 
-Simplified blocking wrapper that:
-1. Runs `node runner.js` with configurable timeouts
-2. Captures runner output to temp file
-3. Parses `RUN_DIR`, `FINAL_SUMMARY_PATH`, `FINAL_SUMMARY_JSON` from output
-4. Returns runner exit code
+## Files
 
-### `watcher.js` — Optional Progress Monitor
+### `runner.js`
 
-Polls the run directory for status changes and emits structured events:
-- `started` / `heartbeat` / `milestone` / `stall` / `completed` / `failed`
-
-Not needed when using `run_v1.sh` (which blocks until completion).
-
-### `cleanup.sh` — Run Directory Garbage Collection
-
-Cleans old run directories with configurable retention:
-- `--keep-hours N` / `--keep-days N`
-- `--dry-run` for preview
-- Skips running tasks by default (`--include-running` to override)
-
-## Quick Start
+The runner launches:
 
 ```bash
-# 1. Run with v1 wrapper (recommended)
-bash run_v1.sh "Analyze the codebase and create a summary" my-task
-
-# 2. Run runner directly
-node runner.js --label smoke --task "echo hello"
-
-# 3. With custom timeouts
-SUBAGENT_CLAUDE_TIMEOUT_S=1200 \
-SUBAGENT_CLAUDE_IDLE_TIMEOUT_S=300 \
-bash run_v1.sh "Your task here" label
-
-# 4. Clean old runs
-bash cleanup.sh --keep-days 3 --dry-run
-bash cleanup.sh --keep-days 3
+claude --permission-mode bypassPermissions --print "<task>"
 ```
 
-## Run Directory Structure
+It writes a run directory containing:
 
-Each run creates a directory under `tmp/claude-runs/`:
+- `meta.json`
+- `status.json`
+- `claude.stdout.log`
+- `claude.stderr.log`
+- `milestones.jsonl`
+- `final-summary.json`
+- `final-report.md`
 
+Key behaviors:
+
+- total timeout (`--timeout-s`)
+- suspected stall threshold (`--idle-timeout-s`)
+- stall grace window (`--stall-grace-s`)
+- `SIGTERM -> SIGKILL` escalation (`--kill-grace-ms`)
+- milestone extraction from explicit markers
+- `stdout` / `stderr` / `workdir` activity tracking
+
+### `run_v1.sh`
+
+Blocking wrapper that:
+
+- resolves the local `runner.js`
+- defaults `WORKDIR` to the caller's current directory
+- prints stable key/value output for shells and orchestrators
+
+Example output:
+
+```text
+RUN_DIR=/abs/path/to/tmp/claude-runs/run-...
+WORKDIR=/abs/path/to/repo
+STATUS=/abs/path/to/.../status.json
+FINAL_SUMMARY_PATH=/abs/path/to/.../final-summary.json
+FINAL_SUMMARY_JSON={...}
 ```
-run-2026-03-16T12-34-56-789Z-my-task/
-├── meta.json              # Command, paths, timeout policy
-├── status.json            # Live state (runner updates heartbeat)
-├── claude.stdout.log      # Raw Claude stdout
-├── claude.stderr.log      # Raw Claude stderr
-├── milestones.jsonl       # Extracted milestones
-├── final-summary.json     # Terminal state (machine-readable)
-└── final-report.md        # Terminal state (human-readable)
-```
 
-## Integration with OpenClaw
+### `watcher.js`
 
-In your agent AGENTS.md or TOOLS.md, configure the default coding path:
+Consumes the run directory and emits structured progress events.
 
-```markdown
-## Coding Task Execution
+For new-format runs it reads `status.stall` as the source of truth.
+For older runs it can still fall back to `--stall-ms` based detection.
 
-Default: `sessions_spawn(runtime="subagent")` with exec:
+### `cleanup.sh`
+
+Deletes stale run directories while skipping `starting` / `running` runs by default.
+
+## Quick start
+
+Run from any project directory; the run output will go under `./tmp/claude-runs` unless you override paths.
+
+### Wrapper path
 
 ```bash
-bash scripts/run_v1.sh "task prompt" "task-label"
+bash examples/subagent-claude-runner/run_v1.sh \
+  "Analyze this repository and summarize the architecture" \
+  repo-summary
 ```
 
-The subagent runs blocking. On completion, `spawn-interceptor` detects `subagent_ended` and wakes the parent via CLI fallback (~20s latency).
+### Direct runner path
+
+```bash
+node examples/subagent-claude-runner/runner.js \
+  --cwd "$PWD" \
+  --label repo-summary \
+  --task "Analyze this repository and summarize the architecture"
 ```
 
-## Known Limitations
+### Override timeouts
 
-- **CLI fallback latency**: `spawn-interceptor`'s `subagent.run()` is unavailable outside gateway request context, so completion notification falls back to CLI (~20s delay)
-- **No intermediate progress to parent**: Claude Code transcript writes happen at LLM turn boundaries. Milestones require explicit `MILESTONE:` markers in Claude output
-- **Single-node**: File-based run directory assumes collocated processes
-- **No auto-retry**: Runner detects failure but does not retry. Retry logic belongs in the orchestration layer
+```bash
+SUBAGENT_CLAUDE_TIMEOUT_S=3600 \
+SUBAGENT_CLAUDE_IDLE_TIMEOUT_S=900 \
+SUBAGENT_CLAUDE_STALL_GRACE_S=300 \
+SUBAGENT_CLAUDE_KILL_GRACE_MS=5000 \
+  bash examples/subagent-claude-runner/run_v1.sh "Your task here" my-task
+```
+
+### Watch a run once
+
+```bash
+node examples/subagent-claude-runner/watcher.js \
+  --run-dir ./tmp/claude-runs/run-2026-03-16T12-34-56-789Z-demo \
+  --once
+```
+
+### Clean old runs
+
+```bash
+bash examples/subagent-claude-runner/cleanup.sh --keep-days 3 --dry-run
+bash examples/subagent-claude-runner/cleanup.sh --keep-days 3
+```
+
+## Milestone convention
+
+If you want machine-readable progress without parsing natural language, ask Claude to print standalone lines such as:
+
+```text
+MILESTONE: started analysis
+[milestone] wrote patch
+[[milestone]] tests passed
+```
+
+Those lines are copied into `milestones.jsonl`.
+
+## Watchdog semantics
+
+The public example uses a **two-stage idle watchdog**.
+
+### Activity sources
+
+Any of these reset idle detection:
+
+1. Claude `stdout`
+2. Claude `stderr`
+3. file activity under `workdir`
+
+The runner ignores its own run-directory writes so it does not keep itself alive accidentally.
+
+### State model
+
+- `timeout.type=total`: exceeded total runtime
+- `stall.suspected=true`: idle threshold crossed
+- `stall.recoveredAt`: activity returned before grace expired
+- `timeout.type=stall`: no recovery during grace window
+
+Useful fields in `status.json` and `final-summary.json`:
+
+- `lastActivityAt`
+- `lastActivitySource`
+- `activity.lastWorkdirAt`
+- `activity.lastWorkdirPath`
+- `activity.workdirEventCount`
+- `stall.suspectedAt`
+- `stall.deadlineAt`
+- `stall.recoveredAt`
+- `stall.hardTimeoutAt`
+- `timeout.type`
+
+## Smoke test
+
+This repository includes a self-contained smoke test that does **not** require a real Claude installation.
+
+```bash
+bash examples/subagent-claude-runner/test_watchdog_smoke.sh
+```
+
+It covers two cases:
+
+1. **quiet but still writing files** → should stay alive and complete
+2. **true hard stall** → should enter suspected stall, then fail with `timeout.type=stall`
+
+## OpenClaw integration pattern
+
+Typical orchestrator flow:
+
+```text
+main agent
+  -> sessions_spawn(runtime="subagent")
+  -> subagent exec: bash examples/subagent-claude-runner/run_v1.sh "task" "label"
+  -> wait for subagent completion
+  -> read final-summary.json or final-report.md
+  -> send only terminal-state result upstream
+```
+
+This keeps the execution model simple:
+
+- one subagent per long task
+- one run directory per task
+- one terminal summary as truth
+
+## Known limitations
+
+- `fs.watch` recursion differs by platform; nested directory visibility may be weaker outside macOS/Windows
+- `workdir` activity is coarse-grained: unrelated file writes in the same directory can delay stall detection
+- milestones still require explicit prefixes; the runner does not infer them from free-form text
+- `CLAUDE_EXTRA_ARGS` is split on whitespace only; it does not implement shell-grade quoting
