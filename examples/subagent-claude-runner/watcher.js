@@ -5,12 +5,12 @@ const path = require('path');
 
 function usage(code = 0) {
   const text = `Usage:
-  node scripts/subagent_run_watcher.js --run-dir /path/to/run [--once]
+  node watcher.js --run-dir /path/to/run [--once]
 
 Options:
   --run-dir <path>       Run directory to watch (required)
   --poll-ms <ms>         Poll interval in milliseconds (default: 2000)
-  --stall-ms <ms>        No-activity threshold for stall events (default: 30000)
+  --stall-ms <ms>        Fallback no-activity threshold for old runs without stall metadata (default: 30000)
   --once                 Scan once and exit
   --help                 Show this help
 
@@ -111,11 +111,15 @@ function humanLine(event) {
 
 function pickLastActivity(status) {
   const candidates = [
-    status?.lastHeartbeatAt,
+    status?.lastActivityAt,
+    status?.activity?.lastActivityAt,
+    status?.lastOutputAt,
+    status?.activity?.lastOutputAt,
+    status?.lastWorkdirAt,
+    status?.activity?.lastWorkdirAt,
     status?.lastStdoutAt,
     status?.lastStderrAt,
     status?.startedAt,
-    status?.updatedAt,
   ].filter(Boolean);
 
   if (candidates.length === 0) {
@@ -152,7 +156,9 @@ async function main() {
     startedAt: null,
     lastHeartbeatAt: null,
     milestoneSeqSeen: 0,
-    lastStallKey: null,
+    lastFallbackStallKey: null,
+    stallSuspectedAt: null,
+    stallRecoveredAt: null,
     terminalState: null,
     terminalCompletedAt: null,
   });
@@ -193,20 +199,47 @@ async function main() {
       cursor.milestoneSeqSeen = milestone.seq || cursor.milestoneSeqSeen + 1;
     }
 
-    if (status && status.state === 'running') {
+    if (status) {
+      const suspectedAt = status.stall?.suspectedAt || null;
+      const recoveredAt = status.stall?.recoveredAt || null;
+      if (status.stall?.suspected && suspectedAt && cursor.stallSuspectedAt !== suspectedAt) {
+        emit(buildEvent('stall', runDir, status.stall?.lastReason || 'suspected stall', {
+          suspectedAt,
+          deadlineAt: status.stall?.deadlineAt || null,
+          idleThresholdSec: status.stall?.idleThresholdSec ?? null,
+          graceSec: status.stall?.graceSec ?? null,
+          lastActivityAt: status.lastActivityAt || status.activity?.lastActivityAt || null,
+          lastActivitySource: status.lastActivitySource || status.activity?.lastActivitySource || null,
+        }));
+        cursor.stallSuspectedAt = suspectedAt;
+      }
+
+      if (!status.stall?.suspected && recoveredAt && cursor.stallRecoveredAt !== recoveredAt) {
+        emit(buildEvent('stall_cleared', runDir, `stall cleared by ${status.stall?.lastRecoverySource || 'activity'}`, {
+          recoveredAt,
+          recoveryCount: status.stall?.recoveryCount ?? 0,
+          lastRecoverySource: status.stall?.lastRecoverySource || null,
+          lastActivityAt: status.lastActivityAt || status.activity?.lastActivityAt || null,
+          lastActivitySource: status.lastActivitySource || status.activity?.lastActivitySource || null,
+        }));
+        cursor.stallRecoveredAt = recoveredAt;
+      }
+    }
+
+    if (status && status.state === 'running' && !status.stall) {
       const lastActivityAt = pickLastActivity(status);
       if (lastActivityAt) {
         const idleMs = Date.now() - new Date(lastActivityAt).getTime();
-        if (idleMs >= args.stallMs && cursor.lastStallKey !== lastActivityAt) {
+        if (idleMs >= args.stallMs && cursor.lastFallbackStallKey !== lastActivityAt) {
           emit(buildEvent('stall', runDir, `no activity for ${idleMs}ms`, {
             idleMs,
             lastActivityAt,
             thresholdMs: args.stallMs,
           }));
-          cursor.lastStallKey = lastActivityAt;
+          cursor.lastFallbackStallKey = lastActivityAt;
         }
-        if (cursor.lastStallKey && new Date(lastActivityAt).getTime() > new Date(cursor.lastStallKey).getTime()) {
-          cursor.lastStallKey = null;
+        if (cursor.lastFallbackStallKey && new Date(lastActivityAt).getTime() > new Date(cursor.lastFallbackStallKey).getTime()) {
+          cursor.lastFallbackStallKey = null;
         }
       }
     }
@@ -222,6 +255,11 @@ async function main() {
           signal: status.signal,
           error: status.error,
           milestoneCount: status.milestoneCount,
+          timedOut: Boolean(status.timedOut),
+          timeoutType: status.timeout?.type || null,
+          lastActivityAt: status.lastActivityAt || status.activity?.lastActivityAt || null,
+          lastActivitySource: status.lastActivitySource || status.activity?.lastActivitySource || null,
+          stallRecoveryCount: status.stall?.recoveryCount ?? 0,
         }));
         cursor.terminalState = status.state;
         cursor.terminalCompletedAt = status.completedAt || null;

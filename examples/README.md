@@ -21,6 +21,31 @@ python3 completion-relay/completion_listener.py --loop --interval 60
 
 15 unit tests / 15 个单元测试: `python3 -m pytest completion-relay/tests/ -v`
 
+### subagent-claude-runner/ (ACP Alternative / ACP 替代路径)
+
+A lightweight `sessions_spawn(runtime="subagent") + Claude Code CLI` execution path with a file-based run protocol.
+
+轻量级 `sessions_spawn(runtime="subagent") + Claude Code CLI` 执行链路，提供文件化 run 协议。
+
+Highlights / 亮点：
+- `runner.js`: total timeout + suspected stall + grace + process-tree cleanup
+- `watcher.js`: `started / heartbeat / milestone / stall / stall_cleared / completed / failed`
+- `run_v1.sh`: blocking wrapper that emits stable `FINAL_SUMMARY_JSON`
+- `test_watchdog_smoke.sh`: self-contained smoke test without real Claude install
+
+```bash
+# Run through wrapper / 通过 wrapper 运行
+bash subagent-claude-runner/run_v1.sh "Analyze this repository" repo-summary
+
+# Optional watcher / 可选 watcher
+node subagent-claude-runner/watcher.js --run-dir ./tmp/claude-runs/<run-id> --once
+
+# Smoke test / 烟测
+bash subagent-claude-runner/test_watchdog_smoke.sh
+```
+
+See `subagent-claude-runner/README.md` for details.
+
 ### l2_capabilities.py
 
 6 L2 capability demos: ACK protocol, Handoff template, Deliverable layers, Single-writer rule, Follow-up bridge, Daily reflection pipeline.

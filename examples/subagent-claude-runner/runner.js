@@ -7,16 +7,17 @@ const { spawn } = require('child_process');
 
 const FINAL_SUMMARY_PREFIX = 'FINAL_SUMMARY_JSON=';
 const FINAL_SUMMARY_PATH_PREFIX = 'FINAL_SUMMARY_PATH=';
-const FINAL_SUMMARY_VERSION = 1;
+const FINAL_SUMMARY_VERSION = 2;
 const DEFAULT_TAIL_CHARS = 2000;
 const DEFAULT_HEARTBEAT_MS = 5000;
-const DEFAULT_TIMEOUT_SEC = 1800;
-const DEFAULT_IDLE_TIMEOUT_SEC = 600;
+const DEFAULT_TIMEOUT_SEC = 3600;
+const DEFAULT_IDLE_TIMEOUT_SEC = 900;
+const DEFAULT_STALL_GRACE_SEC = 300;
 const DEFAULT_KILL_GRACE_MS = 5000;
 
 function usage(code = 0) {
   const text = `Usage:
-  node scripts/subagent_claude_runner.js --task "your task" [--run-dir /path/to/run]
+  node runner.js --task "your task" [--run-dir /path/to/run]
 
 Options:
   --task <text>            Task/prompt passed to Claude CLI
@@ -26,14 +27,17 @@ Options:
   --label <text>           Optional label stored in meta/status
   --heartbeat-ms <ms>      Heartbeat interval (default: ${DEFAULT_HEARTBEAT_MS})
   --timeout-s <sec>        Total runtime timeout in seconds (default: ${DEFAULT_TIMEOUT_SEC}, 0 disables)
-  --idle-timeout-s <sec>   No stdout/stderr timeout in seconds (default: ${DEFAULT_IDLE_TIMEOUT_SEC}, 0 disables)
+  --idle-timeout-s <sec>   No activity timeout in seconds before suspected stall (default: ${DEFAULT_IDLE_TIMEOUT_SEC}, 0 disables)
+  --stall-grace-s <sec>    Additional grace after suspected stall before hard timeout (default: ${DEFAULT_STALL_GRACE_SEC}, 0 disables grace)
   --kill-grace-ms <ms>     Delay between SIGTERM and SIGKILL escalation (default: ${DEFAULT_KILL_GRACE_MS})
   --claude-bin <path>      Claude executable (default: auto-detect known Claude Code CLI paths)
   --help                   Show this help
 
 Environment:
+  SUBAGENT_CLAUDE_HEARTBEAT_MS
   SUBAGENT_CLAUDE_TIMEOUT_S
   SUBAGENT_CLAUDE_IDLE_TIMEOUT_S
+  SUBAGENT_CLAUDE_STALL_GRACE_S
   SUBAGENT_CLAUDE_KILL_GRACE_MS
   CLAUDE_BIN
   CLAUDE_EXTRA_ARGS
@@ -41,9 +45,10 @@ Environment:
 Notes:
   - Default command is: <detected-claude-cli> --permission-mode bypassPermissions --print <task>
   - Detection order: --claude-bin > CLAUDE_BIN > PATH 'claude' > known npm install locations.
-  - Extra args can be supplied via CLAUDE_EXTRA_ARGS as a whitespace-separated string.
+  - Activity watchdog uses stdout/stderr plus workdir file activity (fs.watch when available).
+  - Idle timeout is two-stage: suspected stall at idle threshold, hard timeout only after grace expires.
   - First stdout line is always the runDir; terminal summary lines are emitted only after completion.
-  - On timeout, runner marks state=failed + failureKind=timeout, then performs SIGTERM -> SIGKILL cleanup.
+  - On hard timeout, runner marks state=failed + failureKind=timeout, then performs SIGTERM -> SIGKILL cleanup.
 `;
   const out = code === 0 ? process.stdout : process.stderr;
   out.write(text);
@@ -73,6 +78,10 @@ function parseArgs(argv) {
     idleTimeoutSec: parseNumberOption('--idle-timeout-s', process.env.SUBAGENT_CLAUDE_IDLE_TIMEOUT_S, {
       allowZero: true,
       fallback: DEFAULT_IDLE_TIMEOUT_SEC,
+    }),
+    stallGraceSec: parseNumberOption('--stall-grace-s', process.env.SUBAGENT_CLAUDE_STALL_GRACE_S, {
+      allowZero: true,
+      fallback: DEFAULT_STALL_GRACE_SEC,
     }),
     killGraceMs: parseNumberOption('--kill-grace-ms', process.env.SUBAGENT_CLAUDE_KILL_GRACE_MS, {
       allowZero: true,
@@ -106,6 +115,9 @@ function parseArgs(argv) {
         break;
       case '--idle-timeout-s':
         args.idleTimeoutSec = parseNumberOption('--idle-timeout-s', argv[++i], { allowZero: true });
+        break;
+      case '--stall-grace-s':
+        args.stallGraceSec = parseNumberOption('--stall-grace-s', argv[++i], { allowZero: true });
         break;
       case '--kill-grace-ms':
         args.killGraceMs = parseNumberOption('--kill-grace-ms', argv[++i], { allowZero: true });
@@ -340,10 +352,33 @@ function formatTerminalReport(summary) {
     '',
     `- totalSec: ${summary.timeout?.totalSec ?? 'null'}`,
     `- idleSec: ${summary.timeout?.idleSec ?? 'null'}`,
+    `- stallGraceSec: ${summary.timeout?.stallGraceSec ?? 'null'}`,
     `- killGraceMs: ${summary.timeout?.killGraceMs ?? 'null'}`,
     `- triggeredAt: ${summary.timeout?.triggeredAt || 'null'}`,
     `- sentSigtermAt: ${summary.timeout?.sentSigtermAt || 'null'}`,
     `- escalatedSigkillAt: ${summary.timeout?.escalatedSigkillAt || 'null'}`,
+    '',
+    '## activity',
+    '',
+    `- lastActivityAt: ${summary.lastActivityAt || 'null'}`,
+    `- lastActivitySource: ${summary.lastActivitySource || 'null'}`,
+    `- lastOutputAt: ${summary.lastOutputAt || 'null'}`,
+    `- lastWorkdirAt: ${summary.activity?.lastWorkdirAt || 'null'}`,
+    `- lastWorkdirPath: ${summary.activity?.lastWorkdirPath || 'null'}`,
+    `- workdirEventCount: ${summary.activity?.workdirEventCount ?? 'null'}`,
+    `- monitorKind: ${summary.activity?.monitor?.kind || 'null'}`,
+    `- monitorError: ${summary.activity?.monitor?.error || 'null'}`,
+    '',
+    '## stall watchdog',
+    '',
+    `- suspected: ${summary.stall?.suspected ? 'true' : 'false'}`,
+    `- suspectedAt: ${summary.stall?.suspectedAt || 'null'}`,
+    `- deadlineAt: ${summary.stall?.deadlineAt || 'null'}`,
+    `- recoveredAt: ${summary.stall?.recoveredAt || 'null'}`,
+    `- recoveryCount: ${summary.stall?.recoveryCount ?? 'null'}`,
+    `- lastRecoverySource: ${summary.stall?.lastRecoverySource || 'null'}`,
+    `- hardTimeoutAt: ${summary.stall?.hardTimeoutAt || 'null'}`,
+    `- lastReason: ${summary.stall?.lastReason || 'null'}`,
     '',
     '## stdout tail',
     '',
@@ -382,6 +417,11 @@ function buildFinalSummary(status, files, tails) {
     completedAt: status.completedAt,
     milestoneCount: status.milestoneCount,
     timeout: status.timeout,
+    stall: status.stall,
+    activity: status.activity,
+    lastActivityAt: status.lastActivityAt || null,
+    lastActivitySource: status.lastActivitySource || null,
+    lastOutputAt: status.lastOutputAt || null,
     statusPath: files.status,
     stdoutPath: files.stdout,
     stderrPath: files.stderr,
@@ -432,6 +472,92 @@ function sendSignalToChildTree(pid, signal) {
   return false;
 }
 
+function normalizePathLike(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString('utf8');
+  }
+  return value == null ? '' : String(value);
+}
+
+function pathContains(targetPath, parentPath) {
+  const target = path.resolve(targetPath);
+  const parent = path.resolve(parentPath);
+  return target === parent || target.startsWith(parent + path.sep);
+}
+
+function createWorkdirActivityMonitor({ workdir, ignoredRoots, onActivity, onError }) {
+  const recursive = process.platform === 'darwin' || process.platform === 'win32';
+  let watcher = null;
+  let closed = false;
+  let lastEventKey = null;
+  let lastEventAtMs = 0;
+
+  function shouldIgnore(absPath) {
+    return ignoredRoots.some((root) => pathContains(absPath, root));
+  }
+
+  try {
+    watcher = fs.watch(workdir, { recursive }, (eventType, filename) => {
+      if (closed) {
+        return;
+      }
+      const raw = normalizePathLike(filename).trim();
+      const absPath = raw ? path.resolve(workdir, raw) : workdir;
+      if (shouldIgnore(absPath)) {
+        return;
+      }
+
+      const nowMs = Date.now();
+      const key = `${eventType}:${raw || '(unknown)'}`;
+      if (key === lastEventKey && nowMs - lastEventAtMs < 250) {
+        return;
+      }
+      lastEventKey = key;
+      lastEventAtMs = nowMs;
+
+      onActivity({
+        source: 'workdir',
+        eventType,
+        path: absPath,
+        filename: raw || null,
+        ts: nowIso(),
+      });
+    });
+
+    watcher.on('error', (error) => {
+      if (closed) {
+        return;
+      }
+      onError(error);
+    });
+
+    return {
+      kind: 'fs.watch',
+      recursive,
+      supported: true,
+      close() {
+        closed = true;
+        if (watcher) {
+          watcher.close();
+        }
+      },
+    };
+  } catch (error) {
+    onError(error);
+    return {
+      kind: 'fs.watch',
+      recursive,
+      supported: false,
+      close() {
+        closed = true;
+      },
+    };
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const runDir = path.resolve(args.runDir || defaultRunDir(args.label));
@@ -455,6 +581,11 @@ async function main() {
   const claudeBin = resolveClaudeBin(args.claudeBin);
   const extraArgs = splitExtraArgs(process.env.CLAUDE_EXTRA_ARGS || '');
   const claudeArgs = ['--permission-mode', 'bypassPermissions', '--print', ...extraArgs, args.task];
+  const runsRoot = path.resolve(workdir, 'tmp', 'claude-runs');
+  const ignoredRoots = [runDir];
+  if (pathContains(runDir, runsRoot)) {
+    ignoredRoots.push(runsRoot);
+  }
 
   const meta = {
     label: args.label || null,
@@ -469,7 +600,13 @@ async function main() {
     timeoutPolicy: {
       totalSec: args.timeoutSec,
       idleSec: args.idleTimeoutSec,
+      stallGraceSec: args.stallGraceSec,
       killGraceMs: args.killGraceMs,
+    },
+    activityPolicy: {
+      sources: ['stdout', 'stderr', 'workdir'],
+      workdirMonitor: 'fs.watch',
+      ignoredRoots,
     },
     files,
   };
@@ -489,6 +626,10 @@ async function main() {
     lastStdoutAt: null,
     lastStderrAt: null,
     lastOutputAt: null,
+    lastActivityAt: null,
+    lastActivitySource: null,
+    lastWorkdirAt: null,
+    lastWorkdirPath: null,
     completedAt: null,
     pid: null,
     exitCode: null,
@@ -501,6 +642,7 @@ async function main() {
     timeout: {
       totalSec: args.timeoutSec,
       idleSec: args.idleTimeoutSec,
+      stallGraceSec: args.stallGraceSec,
       killGraceMs: args.killGraceMs,
       totalDeadlineAt: args.timeoutSec > 0 ? isoFromEpochMs(Date.now() + args.timeoutSec * 1000) : null,
       idleDeadlineAt: args.idleTimeoutSec > 0 ? isoFromEpochMs(Date.now() + args.idleTimeoutSec * 1000) : null,
@@ -511,11 +653,48 @@ async function main() {
       sentSigtermAt: null,
       escalatedSigkillAt: null,
     },
+    stall: {
+      suspected: false,
+      suspectedAt: null,
+      deadlineAt: null,
+      recoveredAt: null,
+      recoveryCount: 0,
+      lastReason: null,
+      lastRecoverySource: null,
+      hardTimeoutAt: null,
+      idleThresholdSec: args.idleTimeoutSec,
+      graceSec: args.stallGraceSec,
+    },
+    activity: {
+      lastActivityAt: null,
+      lastActivitySource: null,
+      lastOutputAt: null,
+      lastWorkdirAt: null,
+      lastWorkdirPath: null,
+      lastWorkdirEventType: null,
+      stdoutChunkCount: 0,
+      stderrChunkCount: 0,
+      workdirEventCount: 0,
+      monitor: {
+        kind: null,
+        recursive: null,
+        supported: null,
+        error: null,
+        ignoredRoots,
+      },
+    },
   };
 
   function flushStatus() {
     status.updatedAt = nowIso();
     writeJson(files.status, status);
+  }
+
+  function syncActivityMirror() {
+    status.lastActivityAt = status.activity.lastActivityAt;
+    status.lastActivitySource = status.activity.lastActivitySource;
+    status.lastWorkdirAt = status.activity.lastWorkdirAt;
+    status.lastWorkdirPath = status.activity.lastWorkdirPath;
   }
 
   flushStatus();
@@ -528,18 +707,13 @@ async function main() {
     stderr: createTailBuffer(),
   };
 
-  const child = spawn(claudeBin, claudeArgs, {
-    cwd: workdir,
-    env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: process.platform !== 'win32',
-  });
-
   let milestoneSeq = 0;
   let resolved = false;
   let totalTimer = null;
   let idleTimer = null;
+  let stallTimer = null;
   let killTimer = null;
+  let workdirMonitor = null;
 
   function clearTimers() {
     if (totalTimer) {
@@ -549,6 +723,10 @@ async function main() {
     if (idleTimer) {
       clearTimeout(idleTimer);
       idleTimer = null;
+    }
+    if (stallTimer) {
+      clearTimeout(stallTimer);
+      stallTimer = null;
     }
     if (killTimer) {
       clearTimeout(killTimer);
@@ -578,12 +756,14 @@ async function main() {
       clearTimeout(idleTimer);
       idleTimer = null;
     }
-    const baseAt = status.lastOutputAt || status.startedAt || createdAt;
+    const baseAt = status.lastActivityAt || status.startedAt || createdAt;
     const deadlineMs = new Date(baseAt).getTime() + args.idleTimeoutSec * 1000;
     status.timeout.idleDeadlineAt = isoFromEpochMs(deadlineMs);
     const delayMs = Math.max(0, deadlineMs - Date.now());
     idleTimer = setTimeout(() => {
-      triggerTimeout('idle', `No stdout/stderr for ${args.idleTimeoutSec}s`);
+      const baseline = status.lastActivityAt || status.startedAt || createdAt;
+      const reason = `No activity for ${args.idleTimeoutSec}s since ${baseline} (${status.lastActivitySource || 'none'})`;
+      triggerSuspectedStall(reason);
     }, delayMs);
   }
 
@@ -604,19 +784,78 @@ async function main() {
     }, delayMs);
   }
 
-  function markOutput(source) {
-    const ts = nowIso();
+  function clearSuspectedStall(source) {
+    if (!status.stall.suspected) {
+      return;
+    }
+    status.stall.suspected = false;
+    status.stall.recoveredAt = nowIso();
+    status.stall.recoveryCount += 1;
+    status.stall.lastRecoverySource = source || null;
+    status.stall.deadlineAt = null;
+    if (stallTimer) {
+      clearTimeout(stallTimer);
+      stallTimer = null;
+    }
+  }
+
+  function markActivity(source, detail = {}) {
+    const ts = detail.ts || nowIso();
+
     if (source === 'stdout') {
       status.lastStdoutAt = ts;
-    }
-    if (source === 'stderr') {
+      status.lastOutputAt = ts;
+      status.activity.lastOutputAt = ts;
+      status.activity.stdoutChunkCount += 1;
+    } else if (source === 'stderr') {
       status.lastStderrAt = ts;
+      status.lastOutputAt = ts;
+      status.activity.lastOutputAt = ts;
+      status.activity.stderrChunkCount += 1;
+    } else if (source === 'workdir') {
+      status.activity.lastWorkdirAt = ts;
+      status.activity.lastWorkdirPath = detail.path || null;
+      status.activity.lastWorkdirEventType = detail.eventType || null;
+      status.activity.workdirEventCount += 1;
     }
-    status.lastOutputAt = ts;
+
+    status.activity.lastActivityAt = ts;
+    status.activity.lastActivitySource = source;
+    syncActivityMirror();
+    clearSuspectedStall(source);
     scheduleIdleTimeout();
   }
 
-  function terminateChildForTimeout() {
+  function triggerSuspectedStall(reason) {
+    if (resolved || status.timeout.triggered || status.stall.suspected || args.idleTimeoutSec <= 0) {
+      return;
+    }
+
+    const suspectedAt = nowIso();
+    status.stall.suspected = true;
+    status.stall.suspectedAt = suspectedAt;
+    status.stall.lastReason = reason;
+    status.stall.deadlineAt = args.stallGraceSec > 0 ? isoFromEpochMs(Date.now() + args.stallGraceSec * 1000) : suspectedAt;
+    flushStatus();
+
+    if (args.stallGraceSec <= 0) {
+      status.stall.hardTimeoutAt = nowIso();
+      triggerTimeout('stall', `${reason}; grace exhausted immediately`);
+      return;
+    }
+
+    if (stallTimer) {
+      clearTimeout(stallTimer);
+      stallTimer = null;
+    }
+    stallTimer = setTimeout(() => {
+      status.stall.hardTimeoutAt = nowIso();
+      const totalIdleSec = args.idleTimeoutSec + args.stallGraceSec;
+      triggerTimeout('stall', `No activity for ${totalIdleSec}s (idle ${args.idleTimeoutSec}s + grace ${args.stallGraceSec}s)`);
+    }, args.stallGraceSec * 1000);
+  }
+
+  function terminateChildForTimeout(child) {
     if (!pidExists(child.pid)) {
       return;
     }
@@ -656,41 +895,63 @@ async function main() {
     status.timeout.reason = reason;
     status.timeout.triggeredAt = nowIso();
     flushStatus();
-    terminateChildForTimeout();
+    terminateChildForTimeout(child);
   }
 
+  const child = spawn(claudeBin, claudeArgs, {
+    cwd: workdir,
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
+  });
+
   const stdoutLines = createLineReader((line) => {
-    markOutput('stdout');
     const milestone = extractMilestone(line);
     if (milestone) {
       onMilestone(milestone, 'stdout', line);
-      return;
     }
-    flushStatus();
   });
 
   const stderrLines = createLineReader((line) => {
-    markOutput('stderr');
     const milestone = extractMilestone(line);
     if (milestone) {
       onMilestone(milestone, 'stderr', line);
-      return;
     }
-    flushStatus();
   });
+
+  workdirMonitor = createWorkdirActivityMonitor({
+    workdir,
+    ignoredRoots,
+    onActivity: (event) => {
+      markActivity('workdir', event);
+      flushStatus();
+    },
+    onError: (error) => {
+      status.activity.monitor.error = error.message;
+      flushStatus();
+    },
+  });
+  status.activity.monitor.kind = workdirMonitor.kind;
+  status.activity.monitor.recursive = workdirMonitor.recursive;
+  status.activity.monitor.supported = workdirMonitor.supported;
+  flushStatus();
 
   child.stdout.on('data', (chunk) => {
     const text = chunk.toString('utf8');
     stdoutStream.write(text);
     tails.stdout.push(text);
+    markActivity('stdout');
     stdoutLines.push(text);
+    flushStatus();
   });
 
   child.stderr.on('data', (chunk) => {
     const text = chunk.toString('utf8');
     stderrStream.write(text);
     tails.stderr.push(text);
+    markActivity('stderr');
     stderrLines.push(text);
+    flushStatus();
   });
 
   const heartbeat = setInterval(() => {
@@ -716,6 +977,9 @@ async function main() {
     clearTimers();
     stdoutLines.flush();
     stderrLines.flush();
+    if (workdirMonitor) {
+      workdirMonitor.close();
+    }
     status.lastHeartbeatAt = nowIso();
     flushStatus();
     emitTerminalSummary();
@@ -732,6 +996,7 @@ async function main() {
     status.lastHeartbeatAt = startedAt;
     status.timeout.totalDeadlineAt = args.timeoutSec > 0 ? isoFromEpochMs(new Date(startedAt).getTime() + args.timeoutSec * 1000) : null;
     status.timeout.idleDeadlineAt = args.idleTimeoutSec > 0 ? isoFromEpochMs(new Date(startedAt).getTime() + args.idleTimeoutSec * 1000) : null;
+    markActivity('spawn', { ts: startedAt });
     flushStatus();
     scheduleTotalTimeout();
     scheduleIdleTimeout();

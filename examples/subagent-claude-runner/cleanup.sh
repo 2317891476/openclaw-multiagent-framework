@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WORKSPACE_ROOT="/path/to/workspace"
-ROOT_DIR="$WORKSPACE_ROOT/tmp/claude-runs"
+ROOT_DIR="${SUBAGENT_RUNNER_RUN_ROOT:-$PWD/tmp/claude-runs}"
 KEEP_HOURS=72
 DRY_RUN=0
 INCLUDE_RUNNING=0
 
 usage() {
-  cat <<'EOF'
+  cat <<EOF
 Usage:
-  scripts/cleanup_subagent_runs.sh [options]
+  $0 [options]
 
 Options:
-  --root-dir <path>       Run root to clean (default: /path/to/workspace/tmp/claude-runs)
+  --root-dir <path>       Run root to clean (default: $PWD/tmp/claude-runs)
   --keep-hours <hours>    Keep runs newer than this many hours (default: 72)
   --keep-days <days>      Keep runs newer than this many days (overrides --keep-hours)
   --include-running       Also delete running/starting runs if they are old enough (default: skip running)
@@ -104,8 +103,8 @@ try {
   const state = status.state || '';
   const running = ['starting', 'running'].includes(state);
   const anchor = running
-    ? (status.updatedAt || status.lastHeartbeatAt || status.lastOutputAt || status.startedAt || status.createdAt || '')
-    : (status.completedAt || status.updatedAt || status.lastHeartbeatAt || status.lastOutputAt || status.startedAt || status.createdAt || '');
+    ? (status.updatedAt || status.lastHeartbeatAt || status.lastActivityAt || status.lastOutputAt || status.startedAt || status.createdAt || '')
+    : (status.completedAt || status.updatedAt || status.lastHeartbeatAt || status.lastActivityAt || status.lastOutputAt || status.startedAt || status.createdAt || '');
   process.stdout.write(JSON.stringify({ state, running, anchor }));
 } catch (_) {
   process.stdout.write('{}');
