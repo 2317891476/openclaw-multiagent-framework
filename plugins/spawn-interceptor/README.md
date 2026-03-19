@@ -1,142 +1,175 @@
 # spawn-interceptor
 
-> Zero-config OpenClaw plugin for ACP task lifecycle management. Tracks spawns, relays progress, detects completion (including failures), notifies Discord, and actively wakes parent agents — without any agent-side code changes.
+> Zero-config OpenClaw plugin for **multi-runtime** task lifecycle management. Tracks spawns across `subagent` and legacy `ACP` runtimes, detects completion/failure/stuck states, implements safety guards (idempotency, stale reaper), reconciles with `runs.json` and `tmux` sessions, and actively wakes parent agents — without any agent-side code changes.
 
 ## The Problem
 
-OpenClaw's ACP has five fundamental gaps (each discovered in production):
+OpenClaw's task dispatch has fundamental gaps (each discovered in production):
 
-1. **No completion signal** — `sessions_spawn(runtime="acp")` returns immediately. When the child finishes, nothing happens. No callback, no event, no webhook. ([#40272](https://github.com/openclaw/openclaw/issues/40272))
-2. **Broken event relay** — `parentStreamRelay` has a cross-process bug ([#45205](https://github.com/openclaw/openclaw/issues/45205)): ACP runs in a gateway subprocess, so `onAgentEvent` never crosses the process boundary. Only synthetic `start`/`stall` notices reach the parent.
-3. **Zombie accumulation** — Dead sessions stay `closed: false` in `~/.acpx/sessions/index.json`, consuming `maxConcurrentSessions` slots. ([PR #46949](https://github.com/openclaw/openclaw/pull/46949))
-4. **Batch spawn failure** — Concurrent ACP spawns trigger `ACP_SESSION_INIT_FAILED` due to metadata race conditions. Failed sessions get GC'd and misidentified as "completed". (v3.6 fix)
-5. **Passive hook model** — `before_prompt_build` only fires when someone sends a message to the agent. Completed tasks queue up indefinitely if no one triggers a new turn. (v3.6 fix)
+1. **No completion signal** — `sessions_spawn` returns immediately. When the child finishes, nothing happens. No callback, no event, no webhook.
+2. **Broken event relay** — `parentStreamRelay` has a cross-process bug: ACP runs in a gateway subprocess, so `onAgentEvent` never crosses the process boundary.
+3. **Zombie accumulation** — Dead sessions stay open, consuming `maxConcurrentSessions` slots.
+4. **Timeout/duplicate execution** — Tasks time out prematurely (30min default was too short), get re-dispatched by parent agents, leading to the same task executing 10+ times.
+5. **No stuck detection** — Tasks that hang silently (tmux session dies, subagent crashes) go unnoticed indefinitely.
+6. **No idempotency** — Nothing prevents the same task from being spawned multiple times in quick succession.
 
-Result: agents dispatch tasks into a black hole with zero visibility, false completion reports, and no automatic continuation.
+Result: agents dispatch tasks into a black hole with zero visibility, duplicate execution, false timeout reports, and no automatic continuation.
 
 ## Architecture
 
 ```
-┌─────────────────── spawn-interceptor v3.6.0 ───────────────────┐
-│                                                                 │
-│  HOOKS (system-level interception)                              │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │ before_tool_call   → inject streamTo + taskId + relay    │   │
-│  │                      + immediate start notification      │   │
-│  │ after_tool_call    → link ACP session + streamLogPath    │   │
-│  │                      + detect spawn failures (v3.6)      │   │
-│  │ subagent_spawning  → enrich with Discord context         │   │
-│  │ subagent_spawned   → precise session key binding         │   │
-│  │ subagent_ended     → L1 completion detection             │   │
-│  │ before_prompt_build→ inject completion report            │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                 │
-│  BACKGROUND WORKERS                                             │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │ Progress relay (15s tick, adaptive rate)                  │   │
-│  │   <2min: every tick │ 2-10min: 60s │ >10min: 5min        │   │
-│  │                                                          │   │
-│  │ ACP session poller (15s) → L2 completion/failure detect  │   │
-│  │   + failure heuristics: never-used / too-short (v3.6)    │   │
-│  │ Stale reaper (5min) → L3 timeout fallback                │   │
-│  │ ACPX zombie cleanup → close dead sessions                │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                 │
-│  PROGRESS READING (dual-mode)                                   │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │ Incremental (relay): offset-tracked, noise-filtered      │   │
-│  │ Full (completion): read from byte 0, idempotent          │   │
-│  │ Heartbeat: stall detected → emit liveness signal         │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                 │
-│  POST-COMPLETION (v3.6)                                         │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │ subagent.run(parentSessionKey) → trigger parent turn     │   │
-│  │ prompt injection → parent gets completion report         │   │
-│  │ Discord notification → user sees result                  │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                 │
-│  PERSISTENCE                                                    │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │ task-log.jsonl      → single source of truth             │   │
-│  │ .pending-tasks.json → survives gateway restart           │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────── spawn-interceptor v3.9.0 ────────────────┐
+│                                                          │
+│  HOOKS (system-level interception)                       │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ before_tool_call  → inject params + taskId         │  │
+│  │                     + IDEMPOTENCY GUARD            │  │
+│  │ after_tool_call   → link session + detect failure  │  │
+│  │ subagent_spawned  → session key binding            │  │
+│  │ subagent_ended    → L1 completion detection        │  │
+│  │ before_prompt_build → inject completion report     │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│  SAFETY GUARDS                                           │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ Idempotency: block duplicate spawn (100-char hash) │  │
+│  │ Stale Reaper: 60min timeout + runner liveness chk  │  │
+│  │ Health Poller: 30-60min stuck detection + auto-warn │  │
+│  │ GC: cap consumedSessionIds at 500                  │  │
+│  │ Log Rotation: archive task-log.jsonl at 2MB        │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│  MULTI-RUNTIME RECONCILIATION                            │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ subagent: ~/.openclaw/subagents/runs.json          │  │
+│  │   → startedAt / endedAt / outcome / frozenResult   │  │
+│  │ tmux: cc-* sessions via tmux list-sessions         │  │
+│  │   → /tmp/cc-{label}-completion-report.json         │  │
+│  │ ACP (legacy): status.json heartbeat check          │  │
+│  │ reconcileSubagentRuns(): periodic sync             │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│  POST-COMPLETION                                         │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ subagent.run(parentSessionKey) → wake parent       │  │
+│  │ prompt injection → completion + status rules       │  │
+│  │ Emoji: ✅ success │ ❌ fail │ ⏰ timeout │ ⚠️ stuck │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│  PERSISTENCE                                             │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ task-log.jsonl       → append-only audit log       │  │
+│  │ .pending-tasks.json  → survives gateway restart    │  │
+│  │ subagent-task-registry.json → lifecycle tracking   │  │
+│  │ health-warnings.json → stuck task alerts           │  │
+│  └────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────┘
 ```
+
+## Key Features (v3.9.0)
+
+### Idempotency Guard
+Before tracking a new spawn, checks if an identical task (first 100 chars) is already pending. If a match exists and hasn't timed out, the spawn is **blocked** with a `Duplicate task blocked` message. This prevents the #1 production issue: parent agents re-dispatching the same task due to perceived inactivity.
+
+### Multi-Runtime Liveness Check
+`isRunnerStillActive()` supports three runtimes:
+
+| Runtime | Check Method | Stuck Criteria |
+|---------|-------------|----------------|
+| `subagent` | `runs.json` (startedAt/endedAt) | endedAt exists or no record |
+| `subagent+tmux` | runs.json + `tmux list-sessions` + completion report | tmux session dead + no report file |
+| ACP (legacy) | `status.json` heartbeat | No heartbeat for 10min |
+
+### Health Check Poller
+Runs every 10 minutes. For pending tasks aged 30-60 minutes with no progress:
+1. Checks runtime-specific evidence (runs.json, tmux sessions)
+2. Marks qualifying tasks as `possibly_stuck`
+3. Writes warnings to `health-warnings.json`
+4. **Auto-injects** `⚠️ possibly_stuck` into parent agent's prompt queue
+
+### Stale Reaper
+60-minute timeout (configurable). Before reaping:
+1. Calls `isRunnerStillActive()` — if runner is alive, skip
+2. Classifies timeout: `stale_no_signal` vs `stale_had_progress`
+3. Injects `⏰ timeout` report with guidance: "do NOT auto-retry"
+
+### Subagent Reconciliation
+`reconcileSubagentRuns()` periodically syncs `pendingTasks` with `~/.openclaw/subagents/runs.json`:
+- If `endedAt` exists → mark completed/failed
+- If no runs.json entry after 30min → mark as `lost`
+- Prevents zombie pending tasks from missed `subagent_ended` events
+
+### Task Log Rotation
+Auto-archives `task-log.jsonl` when it exceeds 2MB, checked hourly.
 
 ## Design Decisions
 
 ### Why plugin hooks instead of wrapper functions?
+Agents call `sessions_spawn` directly from training. Wrapper functions get skipped. System-level `before_tool_call` hooks are **invisible to the agent — impossible to bypass**.
 
-Agents have "muscle memory" from training. They call `sessions_spawn` directly. Wrapper functions get skipped. Even `MUST`/`P0` prompt directives fail with <100% compliance. System-level `before_tool_call` hooks are **invisible to the agent — impossible to bypass**.
+### Why idempotency guard before tracking?
+Earlier versions tracked the task first, then checked for duplicates. If blocked, the orphan entry remained in `pendingTasks` forever. Guard now runs **before** `appendLog` and `pendingTasks.set`.
 
-### Why two read modes (incremental vs full)?
+### Why tmux awareness?
+`subagent` tasks frequently launch `tmux` sessions (via `start-tmux-task.sh`) for long-running coding tasks. Without tmux checks, a subagent whose tmux session crashed would appear "still running" in `runs.json` indefinitely.
 
-v3.3 used one `readProgress` for both relay and completion. Relay consumed the file offset → completion found nothing left → **empty completion reports** for a week.
+### Why auto-inject stuck warnings?
+`before_prompt_build` is passive — only fires on new turns. Without active injection via `completedTasksSinceLastPrompt`, stuck tasks would go unnoticed until someone manually checks.
 
-- **Incremental**: offset-tracked, filters noise, for periodic relay
-- **Full**: reads entire file, idempotent, for all completion paths
-
-### Why failure detection in the poller (v3.6)?
-
-Prior to v3.6, `session closed` always meant "assumed complete". But `closed` has three causes:
-
-| Cause | `last_used_at` | Output | Correct status |
-|-------|----------------|--------|---------------|
-| Normal completion | > created_at | Has content | `assumed_complete` |
-| Init failure + GC | = created_at | Empty | **`failed`** |
-| Crash + GC | > created_at | Partial | `assumed_complete` |
-
-v3.6 checks `last_used_at == created_at` (never used) and `age < 2min + no output` (closed too quickly) to distinguish failures from completions.
-
-### Why active parent wake (v3.6)?
-
-`before_prompt_build` is passive — it only runs when the agent starts a new turn. If no one sends a message, completion reports queue forever. `pluginRuntime.subagent.run()` actively delivers a message to the parent session, triggering a new turn and prompt injection.
-
-### Why adaptive relay frequency?
-
-Fixed 15s relay floods Discord during 30-minute tasks (120+ messages).
-
-| Task age | Interval | Rationale |
-|----------|----------|-----------|
-| < 2 min  | 15s | Maximum visibility for short tasks |
-| 2–10 min | 60s | Reduce noise |
-| > 10 min | 5 min | Summary-level only |
+### Why 60-minute stale timeout?
+- 30min (v3.6): Too aggressive — complex coding tasks routinely take 40-50min. 11% false-positive timeout rate.
+- 120min: Too long — genuinely stuck tasks waste resources.
+- 60min: Balanced — covers 95% of legitimate tasks while catching real stalls.
 
 ## Version History
 
 | Version | Key Changes |
 |---------|-------------|
-| **v3.6.0** | **Failure detection**: distinguish init failure from completion. **Active parent wake** via `subagent.run()`. **Spawn error detection** in `after_tool_call`. |
+| **v3.9.0** | **Multi-runtime**: subagent + tmux + ACP support. **Idempotency guard** (position fix). **Health check poller** with auto-inject. **Reconciliation** via runs.json. **GC** for session IDs. **Log rotation**. Dead code cleanup. Version unification. |
+| **v3.8.0** | Stale timeout 30min→60min. Runner liveness check. Completion report includes childSessionKey. Timeout classification. |
+| **v3.6.0** | Failure detection. Active parent wake via `subagent.run()`. Spawn error detection. |
 | **v3.5.0** | Immediate start notification. Heartbeat on stall. Adaptive relay. |
 | **v3.4.0** | Split full/incremental read. 42 unit tests. |
 | **v3.3.0** | Full transcript in completion reports. |
-| **v3.2.0** | Transcript fallback for #45205. |
 | **v3.0.0** | Simplify to `streamTo: "parent"` injection. |
 
-## Testing
+## Configuration
 
-```bash
-node test.js  # 42 tests, ~500ms
-```
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `STALE_TIMEOUT_MS` | 60 min | Time before a task is considered timed out |
+| `REAPER_INTERVAL_MS` | 5 min | How often stale reaper + reconciliation runs |
+| `HEALTH_CHECK_INTERVAL_MS` | 10 min | How often health check poller runs |
+| `LOG_ROTATION_CHECK_MS` | 1 hour | How often task-log size is checked |
+| `MAX_LOG_SIZE_BYTES` | 2 MB | Threshold for log rotation |
+| `MAX_CONSUMED_IDS` | 500 | Cap for consumedAcpSessionIds before GC |
 
 ## Installation
 
 ```bash
 cp -r plugins/spawn-interceptor ~/.openclaw/plugins/
+# or symlink for development:
+ln -s $(pwd)/plugins/spawn-interceptor ~/.openclaw/plugins/spawn-interceptor
 ```
+
+## Persistence Files
+
+| File | Location | Purpose |
+|------|----------|---------|
+| `task-log.jsonl` | `~/.openclaw/shared-context/monitor-tasks/` | Append-only audit log of all task events |
+| `.pending-tasks.json` | Same directory | Active pending tasks, survives restart |
+| `subagent-task-registry.json` | Same directory | Lifecycle + callback tracking for subagent tasks |
+| `health-warnings.json` | Same directory | Current stuck task warnings |
 
 ## Known Limitations
 
-- **Single-turn tasks**: No intermediate progress (transcript writes at turn completion only). Heartbeats provide liveness.
-- **Same-host only**: File system polling requires co-located processes.
-- **Concurrent spawn instability**: 4 concurrent ACP spawns had 50% init failure rate. v3.6 detects but can't prevent.
-- **No auto-retry**: Detects and reports, doesn't retry. Retry is orchestrator's responsibility.
+- **Single-host only**: File system polling requires co-located processes
+- **tmux label matching**: Only detects tmux tasks with explicit `--label` in task prompt
+- **No auto-retry**: Detects and reports failures/timeouts, does not retry. Retry is orchestrator's responsibility
+- **ACP deprecated**: ACP runtime support retained for backward compatibility but not actively tested
 
-## Related Issues & PRs
+## Related
 
-- [#45205](https://github.com/openclaw/openclaw/issues/45205) — Cross-process event relay broken
-- [#40272](https://github.com/openclaw/openclaw/issues/40272) — `notifyChannel` silently ignored
-- [PR #46308](https://github.com/openclaw/openclaw/pull/46308) — Register ACP in subagent lifecycle
-- [PR #46949](https://github.com/openclaw/openclaw/pull/46949) — Back-pressure eviction for zombies
-- [PR #46952](https://github.com/openclaw/openclaw/pull/46952) — Fix fetch proxy for bot identity
+- `subagent_execution_policy.js` — Defines subagent execution profiles, timeout, and output constraints
+- `~/.openclaw/subagents/runs.json` — Authoritative state for subagent runtime tasks
+- `start-tmux-task.sh` / `complete-tmux-task.sh` — tmux task lifecycle scripts
