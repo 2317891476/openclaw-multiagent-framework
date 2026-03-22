@@ -94,10 +94,10 @@ active
 
 ## 任务结果去哪里看
 
-每次 runner 执行都会生成一个 run 目录，位置类似：
+每次 adapter 执行都会生成一个任务目录，位置类似：
 
 ```bash
-tmp/iflow-runs/run-2026-03-22T09-00-04-830Z-live-ok
+runs/JOB-001/task-001
 ```
 
 ### 最重要的文件
@@ -284,6 +284,15 @@ bash examples/subagent-iflow-runner/run_v1.sh "分析这个仓库" repo-summary
 ```bash
 cat tmp/iflow-runs/<run-dir>/final-summary.json
 cat tmp/iflow-runs/<run-dir>/final-report.md
+```
+
+### 看日志
+
+```bash
+cat tmp/iflow-runs/<run-dir>/iflow.stdout.log
+cat tmp/iflow-runs/<run-dir>/iflow.stderr.log
+```
+report.md
 ```
 
 ### 看日志

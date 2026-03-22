@@ -6,6 +6,7 @@
 
 Quick links:
 - [iFlow Runner Quickstart](IFLOW_RUNNER_QUICKSTART.md)
+- [iFlow Adapter README](adapters/iflow/README.md)
 
 **Version**: 2026-03-16-v10 | **License**: MIT | **Status**: Production Ready
 
