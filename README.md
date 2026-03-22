@@ -4,6 +4,9 @@
 
 [中文版 (Chinese README)](README_CN.md)
 
+Quick links:
+- [iFlow Runner Quickstart](IFLOW_RUNNER_QUICKSTART.md)
+
 **Version**: 2026-03-16-v10 | **License**: MIT | **Status**: Production Ready
 
 ---
