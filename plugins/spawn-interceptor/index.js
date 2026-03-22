@@ -1149,6 +1149,73 @@ function healthCheckPendingTasks() {
 }
 
 
+function inferAdapterJobAndTask(task) {
+  try {
+    const text = String(task?.task || task?.evidence?.task || "");
+    const jobMatch = text.match(/\bJOB_ID=([^,\s]+)/);
+    const taskEqMatch = text.match(/\bTASK_ID=([^,\s]+)/);
+    const taskLooseMatch = text.match(/\b(task-[A-Za-z0-9._-]+)/);
+    const jobId = jobMatch ? jobMatch[1] : null;
+    const taskId = taskEqMatch ? taskEqMatch[1] : (taskLooseMatch ? taskLooseMatch[1] : null);
+    return { jobId, taskId };
+  } catch {
+    return { jobId: null, taskId: null };
+  }
+}
+
+function inferAdapterRunDirFromTask(task) {
+  try {
+    const text = String(task?.task || task?.evidence?.task || "");
+    const { jobId, taskId } = inferAdapterJobAndTask(task);
+    if (!jobId || !taskId) return null;
+    const repoHint = text.match(/cd\s+([^&\n]+?)\s+&&/);
+    const repoRoot = repoHint ? repoHint[1].trim() : null;
+    if (!repoRoot) return null;
+    return path.join(repoRoot, "runs", jobId, taskId);
+  } catch {
+    return null;
+  }
+}
+
+function findAdapterRunDirByScan(task) {
+  try {
+    const { jobId, taskId } = inferAdapterJobAndTask(task);
+    if (!jobId || !taskId) return null;
+    const roots = [
+      path.join(os.homedir(), '.openclaw', 'workspace'),
+      process.cwd(),
+    ];
+    for (const root of roots) {
+      const candidate = path.join(root, 'repos', 'openclaw-multiagent-framework', 'runs', jobId, taskId, 'final_summary.json');
+      if (fs.existsSync(candidate)) return { runDir: path.dirname(candidate), summaryPath: candidate };
+      const candidate2 = path.join(root, 'runs', jobId, taskId, 'final_summary.json');
+      if (fs.existsSync(candidate2)) return { runDir: path.dirname(candidate2), summaryPath: candidate2 };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function readAdapterFinalSummaryFromTask(task) {
+  try {
+    let runDir = inferAdapterRunDirFromTask(task);
+    let summaryPath = runDir ? path.join(runDir, 'final_summary.json') : null;
+    if ((!summaryPath || !fs.existsSync(summaryPath))) {
+      const scanned = findAdapterRunDirByScan(task);
+      if (scanned) {
+        runDir = scanned.runDir;
+        summaryPath = scanned.summaryPath;
+      }
+    }
+    if (!runDir || !summaryPath || !fs.existsSync(summaryPath)) return null;
+    const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf-8'));
+    return { runDir, summaryPath, summary };
+  } catch {
+    return null;
+  }
+}
+
 function isRunnerStillActive(task) {
   // For subagent runtime: check runs.json + tmux session status
   if (task.runtime === "subagent" || task.acpSessionKey?.includes(":subagent:")) {
