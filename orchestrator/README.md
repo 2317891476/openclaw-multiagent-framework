@@ -57,14 +57,38 @@ python3 orchestrator/main.py --job-id JOB-DEMO-001 --workspace "$PWD" --max-stag
 ## Current scope
 
 - fixed stage pipeline: `spec -> rtl -> verif -> build`
-- synchronous local execution via `adapters/iflow/run_v1.sh`
+- verified local execution via `adapters/iflow/run_v1.sh`
+- experimental dispatch mode: `agent-subagent` (uses `openclaw agent` to request a `sessions_spawn(runtime="subagent")` turn)
 - no parallelism yet
 - no real build gate yet
-- no `sessions_spawn` bridge yet; this is the local control-loop version first
+
+## Dispatch modes
+
+### `--dispatch-mode local`
+
+The orchestrator directly runs the adapter wrapper locally. This path is verified.
+
+### `--dispatch-mode agent-subagent`
+
+The orchestrator writes a prompt file, then asks an OpenClaw agent turn to spawn a subagent that runs the adapter wrapper.
+
+Example:
+
+```bash
+python3 orchestrator/main.py \
+  --job-id JOB-DEMO-002 \
+  --goal "Implement a parameterized FIFO" \
+  --workspace "$PWD" \
+  --max-stages 1 \
+  --dispatch-mode agent-subagent \
+  --dispatcher-agent main
+```
+
+Current note: the bridge code is present, but in this machine's shell environment `openclaw agent ...` behaved as a blocking CLI and did not yet complete a verified end-to-end smoke test. Treat this mode as experimental until a stable requester session / CLI path is pinned.
 
 ## Next planned steps
 
-- bridge `main.py` to `sessions_spawn(runtime="subagent")`
+- stabilize the `sessions_spawn(runtime="subagent")` bridge with a pinned dispatcher session
 - enrich `final_summary.json` with `changed_files`
 - add artifact validators per stage
 - add build/lint/test gates

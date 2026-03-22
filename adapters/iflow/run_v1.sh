@@ -3,12 +3,24 @@ set -euo pipefail
 
 if [ "$#" -lt 1 ]; then
   echo "usage: $0 \"task prompt\" [task_id]" >&2
+  echo "   or: $0 --task-file /path/to/prompt.txt [task_id]" >&2
   echo "env overrides: JOB_ID / TASK_ID / AGENT_TYPE / SUBAGENT_RUNNER_BIN / SUBAGENT_RUNNER_WORKDIR / SUBAGENT_IFLOW_TIMEOUT_S / SUBAGENT_IFLOW_IDLE_TIMEOUT_S / SUBAGENT_IFLOW_STALL_GRACE_S / SUBAGENT_IFLOW_KILL_GRACE_MS" >&2
   exit 2
 fi
 
-TASK="$1"
-TASK_ID_INPUT="${2:-${TASK_ID:-task-001}}"
+TASK=""
+TASK_ID_INPUT="${TASK_ID:-task-001}"
+if [ "${1:-}" = "--task-file" ]; then
+  if [ "$#" -lt 2 ]; then
+    echo "missing path after --task-file" >&2
+    exit 2
+  fi
+  TASK="$(cat "$2")"
+  TASK_ID_INPUT="${3:-${TASK_ID_INPUT}}"
+else
+  TASK="$1"
+  TASK_ID_INPUT="${2:-${TASK_ID_INPUT}}"
+fi
 JOB_ID_VALUE="${JOB_ID:-JOB-001}"
 AGENT_TYPE_VALUE="${AGENT_TYPE:-generic}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"

@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,19 +64,12 @@ def make_task_id(stage: str, index: int) -> str:
     return f"task-{stage}-{index:03d}"
 
 
-def run_adapter(paths: OrchestratorPaths, job_state: dict, stage: str, task_id: str, prompt: str) -> subprocess.CompletedProcess:
-    env = os.environ.copy()
-    env["JOB_ID"] = job_state["job_id"]
-    env["AGENT_TYPE"] = stage
-    cmd = ["bash", str(paths.adapter_dir / "run_v1.sh"), prompt, task_id]
-    return subprocess.run(
-        cmd,
-        cwd=job_state.get("workspace") or str(paths.repo_root),
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def write_prompt_artifact(job_dir: Path, task_id: str, prompt: str) -> Path:
+    prompts_dir = job_dir / "prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    path = prompts_dir / f"{task_id}.txt"
+    path.write_text(prompt + "\n", encoding="utf-8")
+    return path
 
 
 def parse_runner_kv(stdout: str) -> dict:
@@ -87,18 +82,113 @@ def parse_runner_kv(stdout: str) -> dict:
     return result
 
 
-def run_one_stage(paths: OrchestratorPaths, machine: StageMachine, job_state_path: Path, job_state: dict) -> dict:
+def run_adapter_local(paths: OrchestratorPaths, job_state: dict, stage: str, task_id: str, prompt_file: Path) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env["JOB_ID"] = job_state["job_id"]
+    env["AGENT_TYPE"] = stage
+    cmd = ["bash", str(paths.adapter_dir / "run_v1.sh"), "--task-file", str(prompt_file), task_id]
+    return subprocess.run(
+        cmd,
+        cwd=job_state.get("workspace") or str(paths.repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def build_subagent_dispatch_message(paths: OrchestratorPaths, job_state: dict, stage: str, task_id: str, prompt_file: Path) -> str:
+    workspace = job_state.get("workspace") or str(paths.repo_root)
+    command = (
+        f"cd {shlex.quote(workspace)} && "
+        f"JOB_ID={shlex.quote(job_state['job_id'])} "
+        f"AGENT_TYPE={shlex.quote(stage)} "
+        f"bash {shlex.quote(str(paths.adapter_dir / 'run_v1.sh'))} "
+        f"--task-file {shlex.quote(str(prompt_file))} {shlex.quote(task_id)}"
+    )
+    return (
+        "Use sessions_spawn right now to start exactly one subagent run.\n"
+        "Parameters: runtime='subagent', mode='run', cleanup='delete', cwd set to the workspace below.\n"
+        f"Workspace: {workspace}\n"
+        "The child subagent task is: run exactly this shell command and then stop.\n"
+        f"{command}\n"
+        "Do not do the work yourself. Only spawn the subagent. After spawning, reply briefly with the child session key or run id if available."
+    )
+
+
+def run_adapter_via_agent_subagent(
+    paths: OrchestratorPaths,
+    job_state: dict,
+    stage: str,
+    task_id: str,
+    prompt_file: Path,
+    dispatcher_session_id: str | None,
+    dispatcher_agent: str,
+    wait_timeout_s: int,
+) -> subprocess.CompletedProcess:
+    workspace = job_state.get("workspace") or str(paths.repo_root)
+    message = build_subagent_dispatch_message(paths, job_state, stage, task_id, prompt_file)
+    cmd = ["openclaw", "agent", "--json", "--message", message]
+    if dispatcher_session_id:
+        cmd.extend(["--session-id", dispatcher_session_id])
+    else:
+        cmd.extend(["--agent", dispatcher_agent])
+
+    dispatch = subprocess.run(cmd, cwd=workspace, capture_output=True, text=True, check=False)
+    run_dir = Path(workspace) / "runs" / job_state["job_id"] / task_id
+    summary_path = run_dir / "final_summary.json"
+    deadline = time.time() + wait_timeout_s
+    while time.time() < deadline:
+        if summary_path.exists():
+            stdout = f"RUN_DIR={run_dir}\nFINAL_SUMMARY_PATH={summary_path}\n"
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=(dispatch.stdout or "") + (dispatch.stderr or ""))
+        time.sleep(2)
+
+    return subprocess.CompletedProcess(
+        cmd,
+        1,
+        stdout=dispatch.stdout,
+        stderr=(dispatch.stderr or "") + f"\nTimed out waiting for {summary_path}",
+    )
+
+
+def run_one_stage(
+    paths: OrchestratorPaths,
+    machine: StageMachine,
+    job_state_path: Path,
+    job_state: dict,
+    dispatch_mode: str,
+    dispatcher_session_id: str | None,
+    dispatcher_agent: str,
+    subagent_wait_timeout_s: int,
+) -> dict:
     stage = job_state["current_stage"]
     next_index = len(job_state.get("history", [])) + 1
     task_id = make_task_id(stage, next_index)
     prompt = build_stage_prompt(job_state, stage)
+    prompt_file = write_prompt_artifact(job_state_path.parent, task_id, prompt)
 
     job_state["status"] = "running"
     job_state["current_task_id"] = task_id
     job_state["updated_at"] = now_iso()
     write_json(job_state_path, job_state)
 
-    completed = run_adapter(paths, job_state, stage, task_id, prompt)
+    if dispatch_mode == "local":
+        completed = run_adapter_local(paths, job_state, stage, task_id, prompt_file)
+    elif dispatch_mode == "agent-subagent":
+        completed = run_adapter_via_agent_subagent(
+            paths,
+            job_state,
+            stage,
+            task_id,
+            prompt_file,
+            dispatcher_session_id,
+            dispatcher_agent,
+            subagent_wait_timeout_s,
+        )
+    else:
+        raise RuntimeError(f"unknown dispatch mode: {dispatch_mode}")
+
     kv = parse_runner_kv(completed.stdout)
     run_dir = kv.get("RUN_DIR")
     final_summary_path = kv.get("FINAL_SUMMARY_PATH")
@@ -126,7 +216,11 @@ def run_one_stage(paths: OrchestratorPaths, machine: StageMachine, job_state_pat
     job_state["current_run_dir"] = run_dir
 
     if should_run_build_gate(stage, final_summary):
-        history_entry["build_gate"] = run_build_gate(stage, final_summary, job_state.get("workspace") or str(paths.repo_root))
+        history_entry["build_gate"] = run_build_gate(
+            stage,
+            final_summary,
+            job_state.get("workspace") or str(paths.repo_root),
+        )
 
     decision = machine.decide(stage, final_summary)
     job_state["status"] = decision.job_status
@@ -145,6 +239,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", help="Working directory for adapter execution")
     parser.add_argument("--once", action="store_true", help="Run at most one stage and exit")
     parser.add_argument("--max-stages", type=int, default=0, help="Optional cap on number of stages to execute in this invocation (0 = no cap)")
+    parser.add_argument("--dispatch-mode", choices=["local", "agent-subagent"], default="local")
+    parser.add_argument("--dispatcher-session-id", help="Existing OpenClaw session id used to issue sessions_spawn via openclaw agent")
+    parser.add_argument("--dispatcher-agent", default="main", help="Agent id to use when dispatcher session id is not provided")
+    parser.add_argument("--subagent-wait-timeout-s", type=int, default=1800, help="How long to wait for adapter final_summary.json when dispatching via sessions_spawn")
     return parser
 
 
@@ -166,7 +264,16 @@ def main() -> int:
 
     executed = 0
     while job_state.get("status") not in {"completed", "failed"}:
-        job_state = run_one_stage(paths, machine, job_state_path, job_state)
+        job_state = run_one_stage(
+            paths,
+            machine,
+            job_state_path,
+            job_state,
+            dispatch_mode=args.dispatch_mode,
+            dispatcher_session_id=args.dispatcher_session_id,
+            dispatcher_agent=args.dispatcher_agent,
+            subagent_wait_timeout_s=args.subagent_wait_timeout_s,
+        )
         executed += 1
         if args.once:
             break

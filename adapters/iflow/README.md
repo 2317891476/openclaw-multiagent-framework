@@ -45,6 +45,13 @@ JOB_ID=JOB-001 AGENT_TYPE=rtl \
   bash adapters/iflow/run_v1.sh "Implement FIFO full/empty logic" task-rtl-001
 ```
 
+Or with a prompt file (recommended for orchestrators):
+
+```bash
+JOB_ID=JOB-001 AGENT_TYPE=rtl \
+  bash adapters/iflow/run_v1.sh --task-file jobs/JOB-001/prompts/task-rtl-001.txt task-rtl-001
+```
+
 ## Direct runner usage
 
 ```bash
