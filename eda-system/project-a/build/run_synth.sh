@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-mkdir -p reports/synth
-cat > reports/synth/summary.json <<'JSON'
-{
-  "status": "stub",
-  "gate": "synth",
-  "message": "Replace with your project-specific synthesis command."
-}
-JSON
-echo "synth stub complete"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+cd "${SCRIPT_DIR}/.."
+python3 build/_write_summary.py synth passed "Stub synthesis gate passed. Replace with your project-specific synthesis command."

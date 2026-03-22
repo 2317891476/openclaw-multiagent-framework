@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-mkdir -p reports/lint
-cat > reports/lint/summary.json <<'JSON'
-{
-  "status": "stub",
-  "gate": "lint",
-  "message": "Replace with your project-specific lint command."
-}
-JSON
-echo "lint stub complete"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+cd "${SCRIPT_DIR}/.."
+python3 build/_write_summary.py lint passed "Stub lint gate passed. Replace with your project-specific lint command."

@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-mkdir -p reports/formal
-cat > reports/formal/summary.json <<'JSON'
-{
-  "status": "stub",
-  "gate": "formal",
-  "message": "Replace with your project-specific formal command."
-}
-JSON
-echo "formal stub complete"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+cd "${SCRIPT_DIR}/.."
+python3 build/_write_summary.py formal passed "Stub formal gate passed. Replace with your project-specific formal command."

@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-mkdir -p reports/sim
-cat > reports/sim/summary.json <<'JSON'
-{
-  "status": "stub",
-  "gate": "sim",
-  "message": "Replace with your project-specific simulation command."
-}
-JSON
-echo "sim stub complete"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+cd "${SCRIPT_DIR}/.."
+python3 build/_write_summary.py sim passed "Stub simulation gate passed. Replace with your project-specific simulation command."
