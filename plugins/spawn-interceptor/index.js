@@ -1195,6 +1195,7 @@ function isRunnerStillActive(task) {
 
 
 function reconcileSubagentRuns() {
+  reconcileOrphanedAdapterArtifacts();
   const subagentPending = [...pendingTasks.entries()].filter(
     ([, t]) => t.runtime === "subagent" || t.acpSessionKey?.includes(":subagent:")
   );
@@ -2036,6 +2037,52 @@ const spawnInterceptorPlugin = {
                   child_session_key: targetKey || matchedTask.spawnedSessionKey || null,
                 },
                 metadata: {
+                  requester_session_key: matchedTask.requesterSessionKey || null,
+                },
+              },
+            );
+          } catch (err) {
+            api.logger.warn(
+              `spawn-interceptor: orchestrator patch failed for ${matchedTaskId}: ${err?.message || err}`,
+            );
+          }
+        }
+        onTaskCompleted(matchedTask, completionStatus).catch(() => {});
+        api.logger.info(`spawn-interceptor: ${matchedTaskId} → ${completionStatus} (subagent_ended, pending=${pendingTasks.size})`);
+      } else {
+        appendLog({
+          event: "subagent_ended",
+          targetSessionKey: targetKey,
+          targetKind: event.targetKind || "unknown",
+          reason,
+          outcome,
+          agentId: ctx.runId || "?",
+          endedAt,
+          matchedTask: false,
+        });
+        api.logger.info(`spawn-interceptor: subagent ended (${targetKey}, ${reason}) — no pending match`);
+      }
+    });
+
+    api.logger.info(`spawn-interceptor v3.9.0: all hooks registered. Poller=${ACP_POLL_INTERVAL_MS / 1000}s, Progress=${PROGRESS_RELAY_INTERVAL_MS / 1000}s, ZombieCleanup=every ${REAPER_INTERVAL_MS / 1000}s`);
+  },
+
+  unregister() {
+    if (reaperTimer) { clearInterval(reaperTimer); reaperTimer = null; }
+    if (healthCheckTimer) { clearInterval(healthCheckTimer); healthCheckTimer = null; }
+    if (acpPollerTimer) { clearInterval(acpPollerTimer); acpPollerTimer = null; }
+    if (progressRelayTimer) { clearInterval(progressRelayTimer); progressRelayTimer = null; }
+    consumedAcpSessionIds.clear();
+    lastProgressRelayOffset = {};
+    completedTasksSinceLastPrompt = new Map();
+    pluginLogger = null;
+    pluginRuntime = null;
+    pluginConfig = null;
+  },
+};
+
+export default spawnInterceptorPlugin;
+a: {
                   requester_session_key: matchedTask.requesterSessionKey || null,
                 },
               },
