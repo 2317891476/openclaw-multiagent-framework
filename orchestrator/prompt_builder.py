@@ -7,14 +7,19 @@ from worker_profiles import get_worker_profile
 
 STAGE_HINTS = {
     "project_import": "Decompose or import an existing open-source/project structure into the local EDA skeleton. Create mapping/spec artifacts first; do not jump straight into redesign.",
-    "spec": "Produce specification artifacts only. Do not implement RTL yet.",
-    "rtl": "Implement or refine RTL according to the spec artifacts.",
+    "spec_clarify": "Clarify the CPU upgrade target, constraints, acceptance criteria, and competition-oriented priorities. Focus on architecture requirements rather than RTL edits.",
+    "top_partition": "Partition the processor into top-level subsystems and identify which modules must be replaced or deeply refactored.",
+    "interface_define": "Define clean interfaces for major architectural blocks such as scoreboard, issue logic, MMU/TLB/PTW, cache subsystem, and AI coprocessor boundary.",
+    "rtl_core": "Implement or refine core execution pipeline RTL, especially issue/execute/writeback/control-side logic.",
+    "rtl_memsys": "Implement or refine memory-system RTL, including MMU/TLB/PTW/cache/MSHR/AXI-oriented plumbing.",
     "lint_gate": "Run the fixed lint script and summarize the result, do not improvise commands.",
-    "tb": "Implement or refine testbench collateral only.",
+    "tb_smoke": "Implement or refine a smoke-level testbench and minimum bring-up collateral.",
     "sim_gate": "Run the fixed simulation script and summarize the result, do not improvise commands. Prefer iverilog + vvp; wave viewing should be prepared for gtkwave but not block CI-style execution.",
-    "verification": "Implement assertions/coverage/formal collateral only.",
+    "verification_collateral": "Implement assertions, coverage, and formal collateral only.",
     "formal_gate": "Run the fixed formal script and summarize the result, do not improvise commands.",
     "synth_gate": "Run the fixed synthesis script and summarize the result, do not improvise commands.",
+    "convergence": "Summarize gate outcomes, unresolved blockers, and the minimal next-fix routing decision.",
+    "final_report": "Produce the final architecture report, staged implementation summary, and next engineering milestones.",
     "rtl_fix": "Apply the smallest RTL change required to address the failed gate.",
     "tb_fix": "Apply the smallest TB change required to address the failed gate.",
     "verification_fix": "Apply the smallest verification collateral change required to address the failed gate.",
@@ -28,7 +33,7 @@ def build_stage_prompt(job_state: dict, stage: str) -> str:
     history = job_state.get("history", [])
     profile = get_worker_profile(stage)
     history_lines = []
-    for item in history[-5:]:
+    for item in history[-8:]:
         history_lines.append(
             f"- stage={item.get('stage')} task_id={item.get('task_id')} result={item.get('result')}"
         )

@@ -56,8 +56,9 @@ python3 orchestrator/main.py --job-id JOB-DEMO-001 --workspace "$PWD" --max-stag
 
 ## Current scope
 
-- stage pipeline v2: `project_import -> spec -> rtl -> lint_gate -> tb -> sim_gate -> verification -> formal_gate -> synth_gate`
+- stage pipeline v3: `project_import -> spec_clarify -> top_partition -> interface_define -> rtl_core -> rtl_memsys -> lint_gate -> tb_smoke -> sim_gate -> verification_collateral -> formal_gate -> synth_gate -> convergence -> final_report`
 - worker-profile model instead of long-lived personas:
+  - `project-import-worker`
   - `spec-worker`
   - `rtl-worker`
   - `tb-worker`

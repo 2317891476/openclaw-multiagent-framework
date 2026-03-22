@@ -6,14 +6,19 @@ from typing import Optional
 
 DEFAULT_PIPELINE = [
     "project_import",
-    "spec",
-    "rtl",
+    "spec_clarify",
+    "top_partition",
+    "interface_define",
+    "rtl_core",
+    "rtl_memsys",
     "lint_gate",
-    "tb",
+    "tb_smoke",
     "sim_gate",
-    "verification",
+    "verification_collateral",
     "formal_gate",
     "synth_gate",
+    "convergence",
+    "final_report",
 ]
 
 FAILURE_ROUTES = {
@@ -21,6 +26,7 @@ FAILURE_ROUTES = {
     "sim_gate": "tb_fix",
     "formal_gate": "verification_fix",
     "synth_gate": "build_fix",
+    "convergence": "build_fix",
     "rtl_fix": "lint_gate",
     "tb_fix": "sim_gate",
     "verification_fix": "formal_gate",

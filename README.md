@@ -10,6 +10,7 @@ Quick links:
 - [Job Orchestrator v1 README](orchestrator/README.md)
 - [EDA System Template](eda-system/README.md)
 - [Local Mode EDA Quickstart](LOCAL_MODE_EDA_QUICKSTART.md)
+- [CPU Macro State Machine Quickstart](CPU_MACRO_STATE_MACHINE_QUICKSTART.md)
 
 **Version**: 2026-03-16-v10 | **License**: MIT | **Status**: Production Ready
 
