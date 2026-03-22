@@ -84,7 +84,7 @@ python3 orchestrator/main.py \
   --dispatcher-agent main
 ```
 
-Current note: the bridge code is present, but in this machine's shell environment `openclaw agent ...` behaved as a blocking CLI and did not yet complete a verified end-to-end smoke test. Treat this mode as experimental until a stable requester session / CLI path is pinned.
+Current note: this mode is asynchronous in two phases: (1) wait for `final_summary.json`, then (2) wait a bit longer for framework state (`subagent-task-registry.json` / `job-status/*.json`) to move from pending to terminal. Use `--state-bridge-timeout-s` to control the second wait window.
 
 ## Next planned steps
 

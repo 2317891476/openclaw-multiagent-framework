@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from artifact_validator import validate_final_summary, validate_run_dir
 from build_router import run_build_gate, should_run_build_gate
@@ -35,14 +36,21 @@ class OrchestratorPaths:
     repo_root: Path
     adapter_dir: Path
     jobs_root: Path
+    shared_context: Path
+    task_registry: Path
+    job_status_dir: Path
 
 
 def infer_paths() -> OrchestratorPaths:
     repo_root = Path(__file__).resolve().parents[1]
+    shared_context = Path.home() / ".openclaw" / "shared-context"
     return OrchestratorPaths(
         repo_root=repo_root,
         adapter_dir=repo_root / "adapters" / "iflow",
         jobs_root=repo_root / "jobs",
+        shared_context=shared_context,
+        task_registry=shared_context / "monitor-tasks" / "subagent-task-registry.json",
+        job_status_dir=shared_context / "job-status",
     )
 
 
@@ -80,6 +88,44 @@ def parse_runner_kv(stdout: str) -> dict:
         key, value = line.split("=", 1)
         result[key.strip()] = value.strip()
     return result
+
+
+def try_read_json(path: Path) -> Optional[dict]:
+    try:
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def find_framework_task_record(paths: OrchestratorPaths, job_id: str, task_id: str) -> tuple[Optional[str], Optional[dict]]:
+    payload = try_read_json(paths.task_registry)
+    if not isinstance(payload, dict):
+        return None, None
+    for framework_task_id, record in payload.items():
+        evidence = record.get("evidence") or {}
+        task_text = str(evidence.get("task") or "")
+        if job_id in task_text and task_id in task_text:
+            return framework_task_id, record
+    return None, None
+
+
+def wait_for_framework_task_terminal(paths: OrchestratorPaths, job_id: str, task_id: str, timeout_s: int) -> tuple[Optional[str], Optional[dict], Optional[dict]]:
+    deadline = time.time() + timeout_s
+    found_task_id = None
+    while time.time() < deadline:
+        framework_task_id, record = find_framework_task_record(paths, job_id, task_id)
+        if framework_task_id:
+            found_task_id = framework_task_id
+            job_status = try_read_json(paths.job_status_dir / f"{framework_task_id}.json")
+            callback_status = str(record.get("callback_status") or "")
+            registry_state = str(record.get("state") or "")
+            job_state = str((job_status or {}).get("state") or "")
+            if callback_status in {"acked", "received"} or registry_state in {"completed", "failed", "timeout"} or job_state in {"callback_received", "failed", "timeout"}:
+                return framework_task_id, record, job_status
+        time.sleep(2)
+    return found_task_id, None, None
 
 
 def run_adapter_local(paths: OrchestratorPaths, job_state: dict, stage: str, task_id: str, prompt_file: Path) -> subprocess.CompletedProcess:
@@ -125,6 +171,7 @@ def run_adapter_via_agent_subagent(
     dispatcher_session_id: str | None,
     dispatcher_agent: str,
     wait_timeout_s: int,
+    state_bridge_timeout_s: int,
 ) -> subprocess.CompletedProcess:
     workspace = job_state.get("workspace") or str(paths.repo_root)
     message = build_subagent_dispatch_message(paths, job_state, stage, task_id, prompt_file)
@@ -140,7 +187,19 @@ def run_adapter_via_agent_subagent(
     deadline = time.time() + wait_timeout_s
     while time.time() < deadline:
         if summary_path.exists():
+            framework_task_id, registry_record, job_status = wait_for_framework_task_terminal(
+                paths,
+                job_state["job_id"],
+                task_id,
+                state_bridge_timeout_s,
+            )
             stdout = f"RUN_DIR={run_dir}\nFINAL_SUMMARY_PATH={summary_path}\n"
+            if framework_task_id:
+                stdout += f"FRAMEWORK_TASK_ID={framework_task_id}\n"
+            if registry_record:
+                stdout += f"FRAMEWORK_CALLBACK_STATUS={registry_record.get('callback_status')}\n"
+            if job_status:
+                stdout += f"FRAMEWORK_JOB_STATE={job_status.get('state')}\n"
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=(dispatch.stdout or "") + (dispatch.stderr or ""))
         time.sleep(2)
 
@@ -161,6 +220,7 @@ def run_one_stage(
     dispatcher_session_id: str | None,
     dispatcher_agent: str,
     subagent_wait_timeout_s: int,
+    state_bridge_timeout_s: int,
 ) -> dict:
     stage = job_state["current_stage"]
     next_index = len(job_state.get("history", [])) + 1
@@ -185,6 +245,7 @@ def run_one_stage(
             dispatcher_session_id,
             dispatcher_agent,
             subagent_wait_timeout_s,
+            state_bridge_timeout_s,
         )
     else:
         raise RuntimeError(f"unknown dispatch mode: {dispatch_mode}")
@@ -212,6 +273,16 @@ def run_one_stage(
         "summary": final_summary.get("summary"),
         "run_dir": run_dir,
     }
+    framework_task_id = kv.get("FRAMEWORK_TASK_ID")
+    framework_callback_status = kv.get("FRAMEWORK_CALLBACK_STATUS")
+    framework_job_state = kv.get("FRAMEWORK_JOB_STATE")
+    if framework_task_id:
+        history_entry["framework_task_id"] = framework_task_id
+    if framework_callback_status:
+        history_entry["framework_callback_status"] = framework_callback_status
+    if framework_job_state:
+        history_entry["framework_job_state"] = framework_job_state
+
     job_state.setdefault("history", []).append(history_entry)
     job_state["current_run_dir"] = run_dir
 
@@ -243,6 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dispatcher-session-id", help="Existing OpenClaw session id used to issue sessions_spawn via openclaw agent")
     parser.add_argument("--dispatcher-agent", default="main", help="Agent id to use when dispatcher session id is not provided")
     parser.add_argument("--subagent-wait-timeout-s", type=int, default=1800, help="How long to wait for adapter final_summary.json when dispatching via sessions_spawn")
+    parser.add_argument("--state-bridge-timeout-s", type=int, default=120, help="Extra time to wait for framework registry/job-status to move from pending to terminal after final_summary.json exists")
     return parser
 
 
@@ -273,6 +345,7 @@ def main() -> int:
             dispatcher_session_id=args.dispatcher_session_id,
             dispatcher_agent=args.dispatcher_agent,
             subagent_wait_timeout_s=args.subagent_wait_timeout_s,
+            state_bridge_timeout_s=args.state_bridge_timeout_s,
         )
         executed += 1
         if args.once:

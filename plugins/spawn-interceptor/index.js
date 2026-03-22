@@ -1149,73 +1149,6 @@ function healthCheckPendingTasks() {
 }
 
 
-function inferAdapterJobAndTask(task) {
-  try {
-    const text = String(task?.task || task?.evidence?.task || "");
-    const jobMatch = text.match(/\bJOB_ID=([^,\s]+)/);
-    const taskEqMatch = text.match(/\bTASK_ID=([^,\s]+)/);
-    const taskLooseMatch = text.match(/\b(task-[A-Za-z0-9._-]+)/);
-    const jobId = jobMatch ? jobMatch[1] : null;
-    const taskId = taskEqMatch ? taskEqMatch[1] : (taskLooseMatch ? taskLooseMatch[1] : null);
-    return { jobId, taskId };
-  } catch {
-    return { jobId: null, taskId: null };
-  }
-}
-
-function inferAdapterRunDirFromTask(task) {
-  try {
-    const text = String(task?.task || task?.evidence?.task || "");
-    const { jobId, taskId } = inferAdapterJobAndTask(task);
-    if (!jobId || !taskId) return null;
-    const repoHint = text.match(/cd\s+([^&\n]+?)\s+&&/);
-    const repoRoot = repoHint ? repoHint[1].trim() : null;
-    if (!repoRoot) return null;
-    return path.join(repoRoot, "runs", jobId, taskId);
-  } catch {
-    return null;
-  }
-}
-
-function findAdapterRunDirByScan(task) {
-  try {
-    const { jobId, taskId } = inferAdapterJobAndTask(task);
-    if (!jobId || !taskId) return null;
-    const roots = [
-      path.join(os.homedir(), '.openclaw', 'workspace'),
-      process.cwd(),
-    ];
-    for (const root of roots) {
-      const candidate = path.join(root, 'repos', 'openclaw-multiagent-framework', 'runs', jobId, taskId, 'final_summary.json');
-      if (fs.existsSync(candidate)) return { runDir: path.dirname(candidate), summaryPath: candidate };
-      const candidate2 = path.join(root, 'runs', jobId, taskId, 'final_summary.json');
-      if (fs.existsSync(candidate2)) return { runDir: path.dirname(candidate2), summaryPath: candidate2 };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function readAdapterFinalSummaryFromTask(task) {
-  try {
-    let runDir = inferAdapterRunDirFromTask(task);
-    let summaryPath = runDir ? path.join(runDir, 'final_summary.json') : null;
-    if ((!summaryPath || !fs.existsSync(summaryPath))) {
-      const scanned = findAdapterRunDirByScan(task);
-      if (scanned) {
-        runDir = scanned.runDir;
-        summaryPath = scanned.summaryPath;
-      }
-    }
-    if (!runDir || !summaryPath || !fs.existsSync(summaryPath)) return null;
-    const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf-8'));
-    return { runDir, summaryPath, summary };
-  } catch {
-    return null;
-  }
-}
-
 function isRunnerStillActive(task) {
   // For subagent runtime: check runs.json + tmux session status
   if (task.runtime === "subagent" || task.acpSessionKey?.includes(":subagent:")) {
@@ -1262,7 +1195,6 @@ function isRunnerStillActive(task) {
 
 
 function reconcileSubagentRuns() {
-  reconcileOrphanedAdapterArtifacts();
   const subagentPending = [...pendingTasks.entries()].filter(
     ([, t]) => t.runtime === "subagent" || t.acpSessionKey?.includes(":subagent:")
   );
@@ -1281,57 +1213,6 @@ function reconcileSubagentRuns() {
 
     const run = runsByChildKey.get(childKey) || null;
     if (!run) {
-      const adapterResult = readAdapterFinalSummaryFromTask(task);
-      if (adapterResult) {
-        const { runDir, summaryPath, summary } = adapterResult;
-        const status = summary?.status === "completed" ? "completed" : "failed";
-        const completedAt = summary?.completed_at || new Date().toISOString();
-        pluginLogger?.info(`spawn-interceptor: reconcile — ${taskId} recovered from adapter final_summary (${summaryPath}), marking as ${status}`);
-        pendingTasks.delete(taskId);
-        appendLog({
-          taskId, agentId: task.agentId, sessionKey: task.sessionKey,
-          requesterSessionKey: task.requesterSessionKey,
-          runtime: task.runtime, task: task.task, spawnedAt: task.spawnedAt,
-          status, completedAt,
-          completionSource: "reconcile_adapter_final_summary",
-          reason: `adapter final_summary present at ${summaryPath}`,
-        });
-        if (task.runtime === "subagent") {
-          try {
-            recordTaskTerminal(task, status, {
-              completion_source: "reconcile_adapter_final_summary",
-              completed_at: completedAt,
-              run_dir: runDir,
-              final_summary_path: summaryPath,
-            });
-          } catch {}
-          try {
-            markJobStatusTaskCompletedFromSubagent(
-              task,
-              status,
-              {
-                result: {
-                  status,
-                  summary: summary?.summary || null,
-                  run_dir: runDir,
-                  final_summary_path: summaryPath,
-                },
-                metadata: {
-                  requester_session_key: task.requesterSessionKey || null,
-                },
-              },
-            );
-          } catch (err) {
-            pluginLogger?.warn?.(
-              `spawn-interceptor: orchestrator reconcile(final_summary) patch failed for ${taskId}: ${err?.message || err}`,
-            );
-          }
-        }
-        onTaskCompleted(task, status, summary?.summary || "adapter final_summary recovered").catch(() => {});
-        reconciled++;
-        continue;
-      }
-
       // No run record — if task is old enough, it was likely from a previous gateway session
       const age = Date.now() - new Date(task.spawnedAt).getTime();
       if (age > 30 * 60 * 1000) {
@@ -2104,52 +1985,6 @@ const spawnInterceptorPlugin = {
                   child_session_key: targetKey || matchedTask.spawnedSessionKey || null,
                 },
                 metadata: {
-                  requester_session_key: matchedTask.requesterSessionKey || null,
-                },
-              },
-            );
-          } catch (err) {
-            api.logger.warn(
-              `spawn-interceptor: orchestrator patch failed for ${matchedTaskId}: ${err?.message || err}`,
-            );
-          }
-        }
-        onTaskCompleted(matchedTask, completionStatus).catch(() => {});
-        api.logger.info(`spawn-interceptor: ${matchedTaskId} → ${completionStatus} (subagent_ended, pending=${pendingTasks.size})`);
-      } else {
-        appendLog({
-          event: "subagent_ended",
-          targetSessionKey: targetKey,
-          targetKind: event.targetKind || "unknown",
-          reason,
-          outcome,
-          agentId: ctx.runId || "?",
-          endedAt,
-          matchedTask: false,
-        });
-        api.logger.info(`spawn-interceptor: subagent ended (${targetKey}, ${reason}) — no pending match`);
-      }
-    });
-
-    api.logger.info(`spawn-interceptor v3.9.0: all hooks registered. Poller=${ACP_POLL_INTERVAL_MS / 1000}s, Progress=${PROGRESS_RELAY_INTERVAL_MS / 1000}s, ZombieCleanup=every ${REAPER_INTERVAL_MS / 1000}s`);
-  },
-
-  unregister() {
-    if (reaperTimer) { clearInterval(reaperTimer); reaperTimer = null; }
-    if (healthCheckTimer) { clearInterval(healthCheckTimer); healthCheckTimer = null; }
-    if (acpPollerTimer) { clearInterval(acpPollerTimer); acpPollerTimer = null; }
-    if (progressRelayTimer) { clearInterval(progressRelayTimer); progressRelayTimer = null; }
-    consumedAcpSessionIds.clear();
-    lastProgressRelayOffset = {};
-    completedTasksSinceLastPrompt = new Map();
-    pluginLogger = null;
-    pluginRuntime = null;
-    pluginConfig = null;
-  },
-};
-
-export default spawnInterceptorPlugin;
-a: {
                   requester_session_key: matchedTask.requesterSessionKey || null,
                 },
               },
