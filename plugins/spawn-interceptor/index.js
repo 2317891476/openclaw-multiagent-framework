@@ -1213,6 +1213,57 @@ function reconcileSubagentRuns() {
 
     const run = runsByChildKey.get(childKey) || null;
     if (!run) {
+      const adapterResult = readAdapterFinalSummaryFromTask(task);
+      if (adapterResult) {
+        const { runDir, summaryPath, summary } = adapterResult;
+        const status = summary?.status === "completed" ? "completed" : "failed";
+        const completedAt = summary?.completed_at || new Date().toISOString();
+        pluginLogger?.info(`spawn-interceptor: reconcile — ${taskId} recovered from adapter final_summary (${summaryPath}), marking as ${status}`);
+        pendingTasks.delete(taskId);
+        appendLog({
+          taskId, agentId: task.agentId, sessionKey: task.sessionKey,
+          requesterSessionKey: task.requesterSessionKey,
+          runtime: task.runtime, task: task.task, spawnedAt: task.spawnedAt,
+          status, completedAt,
+          completionSource: "reconcile_adapter_final_summary",
+          reason: `adapter final_summary present at ${summaryPath}`,
+        });
+        if (task.runtime === "subagent") {
+          try {
+            recordTaskTerminal(task, status, {
+              completion_source: "reconcile_adapter_final_summary",
+              completed_at: completedAt,
+              run_dir: runDir,
+              final_summary_path: summaryPath,
+            });
+          } catch {}
+          try {
+            markJobStatusTaskCompletedFromSubagent(
+              task,
+              status,
+              {
+                result: {
+                  status,
+                  summary: summary?.summary || null,
+                  run_dir: runDir,
+                  final_summary_path: summaryPath,
+                },
+                metadata: {
+                  requester_session_key: task.requesterSessionKey || null,
+                },
+              },
+            );
+          } catch (err) {
+            pluginLogger?.warn?.(
+              `spawn-interceptor: orchestrator reconcile(final_summary) patch failed for ${taskId}: ${err?.message || err}`,
+            );
+          }
+        }
+        onTaskCompleted(task, status, summary?.summary || "adapter final_summary recovered").catch(() => {});
+        reconciled++;
+        continue;
+      }
+
       // No run record — if task is old enough, it was likely from a previous gateway session
       const age = Date.now() - new Date(task.spawnedAt).getTime();
       if (age > 30 * 60 * 1000) {
