@@ -14,6 +14,21 @@ class WorkerProfile:
 
 
 WORKER_PROFILES: dict[str, WorkerProfile] = {
+    "project_import": WorkerProfile(
+        name="project-import-worker",
+        agent_type="project_import",
+        purpose="Decompose an upstream/open-source project into the EDA project skeleton without implementing new design intent.",
+        allowed_paths=("spec/", "rtl/", "tb/", "verif/", "build/", "reports/"),
+        required_outputs=(
+            "spec/import_manifest.md",
+            "spec/source_map.md",
+            "build/filelist.f",
+        ),
+        notes=(
+            "Focus on mapping/importing existing project structure into the local EDA layout.",
+            "Do not invent missing functionality beyond what is needed for a faithful decomposition.",
+        ),
+    ),
     "spec": WorkerProfile(
         name="spec-worker",
         agent_type="spec",

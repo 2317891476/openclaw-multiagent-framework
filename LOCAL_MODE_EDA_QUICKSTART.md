@@ -74,6 +74,19 @@ cat eda-system/project-a/reports/formal/summary.json
 cat eda-system/project-a/reports/synth/summary.json
 ```
 
+Simulation notes:
+
+```bash
+# Provide your source list here first
+cat eda-system/project-a/build/filelist.f
+
+# Run sim gate directly
+cd eda-system/project-a && bash build/run_sim.sh
+
+# Open waveform later if gtkwave is installed
+bash build/run_view_wave.sh
+```
+
 ## Notes
 
 - This mode is the current stable path.

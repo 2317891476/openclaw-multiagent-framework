@@ -2,6 +2,8 @@
 
 Recommended top-level layout for a local EDA automation workspace:
 
+The first stage in the local orchestrator is now `project_import`, which is intended to decompose/import an upstream open-source project into this layout before spec/RTL/testbench work begins.
+
 ```text
 eda-system/
   orchestrator/

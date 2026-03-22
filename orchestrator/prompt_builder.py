@@ -6,11 +6,12 @@ from worker_profiles import get_worker_profile
 
 
 STAGE_HINTS = {
+    "project_import": "Decompose or import an existing open-source/project structure into the local EDA skeleton. Create mapping/spec artifacts first; do not jump straight into redesign.",
     "spec": "Produce specification artifacts only. Do not implement RTL yet.",
     "rtl": "Implement or refine RTL according to the spec artifacts.",
     "lint_gate": "Run the fixed lint script and summarize the result, do not improvise commands.",
     "tb": "Implement or refine testbench collateral only.",
-    "sim_gate": "Run the fixed simulation script and summarize the result, do not improvise commands.",
+    "sim_gate": "Run the fixed simulation script and summarize the result, do not improvise commands. Prefer iverilog + vvp; wave viewing should be prepared for gtkwave but not block CI-style execution.",
     "verification": "Implement assertions/coverage/formal collateral only.",
     "formal_gate": "Run the fixed formal script and summarize the result, do not improvise commands.",
     "synth_gate": "Run the fixed synthesis script and summarize the result, do not improvise commands.",
@@ -73,6 +74,7 @@ def build_stage_prompt(job_state: dict, stage: str) -> str:
         - Respect project IFLOW.md constraints if present.
         - Do not modify files outside the allowed paths.
         - If this is a gate stage, prefer fixed scripts under build/ instead of ad-hoc commands.
+        - If simulation is involved, keep execution non-interactive; write wave artifacts that can later be opened in gtkwave.
         - The adapter will capture stdout/stderr and produce final_summary.json.
         """
     ).strip()

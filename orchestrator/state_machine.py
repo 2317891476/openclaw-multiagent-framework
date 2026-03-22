@@ -5,6 +5,7 @@ from typing import Optional
 
 
 DEFAULT_PIPELINE = [
+    "project_import",
     "spec",
     "rtl",
     "lint_gate",

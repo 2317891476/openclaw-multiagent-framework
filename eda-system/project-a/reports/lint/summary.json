@@ -1,0 +1,8 @@
+{
+  "gate": "lint",
+  "status": "passed",
+  "message": "Stub lint gate passed. Replace with your project-specific lint command.",
+  "returncode": 0,
+  "generated_at": "2026-03-22T17:18:34.122701+00:00",
+  "artifacts": []
+}

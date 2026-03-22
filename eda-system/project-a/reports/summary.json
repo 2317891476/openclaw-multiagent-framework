@@ -1,0 +1,8 @@
+{
+  "gate": "sim",
+  "status": "failed",
+  "message": "build/filelist.f missing; template created",
+  "returncode": 1,
+  "generated_at": "2026-03-22T17:23:30.305869+00:00",
+  "artifacts": []
+}
