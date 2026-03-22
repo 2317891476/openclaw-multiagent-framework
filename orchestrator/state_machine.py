@@ -4,8 +4,29 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-DEFAULT_PIPELINE = ["spec", "rtl", "verif", "build"]
-TERMINAL_STATUSES = {"completed", "failed"}
+DEFAULT_PIPELINE = [
+    "spec",
+    "rtl",
+    "lint_gate",
+    "tb",
+    "sim_gate",
+    "verification",
+    "formal_gate",
+    "synth_gate",
+]
+
+FAILURE_ROUTES = {
+    "lint_gate": "rtl_fix",
+    "sim_gate": "tb_fix",
+    "formal_gate": "verification_fix",
+    "synth_gate": "build_fix",
+    "rtl_fix": "lint_gate",
+    "tb_fix": "sim_gate",
+    "verification_fix": "formal_gate",
+    "build_fix": "synth_gate",
+}
+
+GATE_STAGES = {"lint_gate", "sim_gate", "formal_gate", "synth_gate"}
 
 
 @dataclass
@@ -26,7 +47,7 @@ class StageMachine:
         try:
             idx = self.pipeline.index(stage)
         except ValueError:
-            return None
+            return FAILURE_ROUTES.get(stage)
         if idx + 1 >= len(self.pipeline):
             return None
         return self.pipeline[idx + 1]
@@ -34,6 +55,13 @@ class StageMachine:
     def decide(self, current_stage: str, final_summary: dict) -> TransitionDecision:
         status = final_summary.get("status")
         if status != "completed":
+            fallback = FAILURE_ROUTES.get(current_stage)
+            if fallback:
+                return TransitionDecision(
+                    next_stage=fallback,
+                    job_status="running",
+                    reason=f"stage {current_stage} failed -> route to {fallback}",
+                )
             return TransitionDecision(
                 next_stage=None,
                 job_status="failed",

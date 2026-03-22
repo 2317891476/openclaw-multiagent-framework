@@ -56,11 +56,17 @@ python3 orchestrator/main.py --job-id JOB-DEMO-001 --workspace "$PWD" --max-stag
 
 ## Current scope
 
-- fixed stage pipeline: `spec -> rtl -> verif -> build`
+- stage pipeline v2: `spec -> rtl -> lint_gate -> tb -> sim_gate -> verification -> formal_gate -> synth_gate`
+- worker-profile model instead of long-lived personas:
+  - `spec-worker`
+  - `rtl-worker`
+  - `tb-worker`
+  - `verification-worker`
+  - `build-worker`
 - verified local execution via `adapters/iflow/run_v1.sh`
 - experimental dispatch mode: `agent-subagent` (uses `openclaw agent` to request a `sessions_spawn(runtime="subagent")` turn)
+- build/integration gates prefer fixed scripts under `build/`
 - no parallelism yet
-- no real build gate yet
 
 ## Dispatch modes
 

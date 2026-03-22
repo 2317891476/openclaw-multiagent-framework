@@ -276,7 +276,7 @@ bash examples/subagent-iflow-runner/run_v1.sh "任务内容" label
 
 ```bash
 cd /home/illya/.openclaw/workspace/repos/openclaw-multiagent-framework
-bash examples/subagent-iflow-runner/run_v1.sh "分析这个仓库" repo-summary
+JOB_ID=JOB-001 AGENT_TYPE=generic bash adapters/iflow/run_v1.sh "分析这个仓库" task-001
 ```
 
 ### 看结果
