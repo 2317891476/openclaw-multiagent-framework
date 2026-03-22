@@ -1,6 +1,6 @@
 # OpenClaw Multi-Agent Collaboration Framework
 
-> A battle-tested multi-agent collaboration protocol and architecture for OpenClaw. Solves unreliable ACP communication, agent task-registration amnesia, and ambiguous timeout semantics with a zero-config plugin system. Includes a lightweight subagent + Claude Code CLI runner as a stable ACP alternative.
+> A battle-tested multi-agent collaboration protocol and architecture for OpenClaw. Solves unreliable ACP communication, agent task-registration amnesia, and ambiguous timeout semantics with a zero-config plugin system. Includes lightweight subagent runner examples for both Claude Code CLI and iFlow CLI as stable ACP alternatives.
 
 [中文版 (Chinese README)](README_CN.md)
 

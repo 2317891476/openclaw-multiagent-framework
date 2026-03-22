@@ -169,6 +169,16 @@ MVP (第 1 周) → 习惯养成 (第 2-3 周) → 全量能力 (第 4 周+)
 
 ## 下一步
 
+### 本地子代理 runner 快速入口
+
+```bash
+# iFlow 版本
+bash examples/subagent-iflow-runner/run_v1.sh "分析这个仓库" repo-summary
+
+# Claude 版本（如果本机有 claude CLI）
+bash examples/subagent-claude-runner/run_v1.sh "Analyze this repository" repo-summary
+```
+
 1. **运行测试**：验证所有组件正常
    ```bash
    cd examples/completion-relay && python3 -m pytest tests/ -v
@@ -178,3 +188,4 @@ MVP (第 1 周) → 习惯养成 (第 2-3 周) → 全量能力 (第 4 周+)
 2. **阅读完整协议**：深入理解 `AGENT_PROTOCOL.md`
 
 3. **阅读设计方案**：理解 [COMMUNICATION_ISSUES.md](COMMUNICATION_ISSUES.md)
+ES.md)
