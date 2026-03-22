@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JobState",
+  "type": "object",
+  "required": ["job_id", "goal", "current_stage", "status", "history"],
+  "properties": {
+    "job_id": { "type": "string" },
+    "goal": { "type": "string" },
+    "workspace": { "type": "string" },
+    "current_stage": { "type": "string" },
+    "status": { "type": "string", "enum": ["pending", "running", "completed", "failed"] },
+    "current_task_id": { "type": ["string", "null"] },
+    "current_run_dir": { "type": ["string", "null"] },
+    "updated_at": { "type": ["string", "null"] },
+    "history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stage", "task_id", "result"],
+        "properties": {
+          "stage": { "type": "string" },
+          "task_id": { "type": "string" },
+          "result": { "type": "string" },
+          "summary": { "type": ["string", "null"] },
+          "run_dir": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}
